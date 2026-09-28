@@ -1,5 +1,6 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
 const router = express.Router();
@@ -8,6 +9,23 @@ const router = express.Router();
  * Basic email format validator regex
  */
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Authentication configuration and cookie helpers
+ */
+const JWT_SECRET = process.env.JWT_SECRET || 'nexora_dev_jwt_secret_change_in_production';
+const COOKIE_NAME = 'nexora_token';
+
+const getCookieOptions = () => {
+  const isProduction = process.env.NODE_ENV === 'production';
+  return {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'strict' : 'lax',
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in milliseconds
+    path: '/'
+  };
+};
 
 /**
  * POST /api/auth/signup
@@ -103,6 +121,119 @@ router.post('/signup', async (req, res) => {
       message: 'Something went wrong while creating the account'
     });
   }
+});
+
+/**
+ * POST /api/auth/login
+ * Authenticate local user with email & password and issue secure HTTP-only cookie
+ */
+router.post('/login', async (req, res) => {
+  const { email, password } = req.body || {};
+
+  // 1. Validate email
+  if (!email || typeof email !== 'string' || email.trim().length === 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email is required and cannot be empty or whitespace-only'
+    });
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+
+  if (!EMAIL_REGEX.test(normalizedEmail)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Please provide a valid email address'
+    });
+  }
+
+  // 2. Validate password
+  if (!password || typeof password !== 'string' || password.trim().length === 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'Password is required and cannot be empty or whitespace-only'
+    });
+  }
+
+  try {
+    // 3. User lookup by normalized email
+    const user = await User.findOne({ email: normalizedEmail });
+
+    // Account enumeration prevention: generic 401 response if user does not exist
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // 4. Verify auth provider is local (do not authenticate Google users with password)
+    if (user.authProvider !== 'local' || !user.passwordHash) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // 5. Verify password hash using bcrypt
+    const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // 6. Sign JWT session token
+    const token = jwt.sign(
+      {
+        id: user._id.toString(),
+        email: user.email,
+        authProvider: user.authProvider
+      },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // 7. Set secure HTTP-only cookie
+    res.cookie(COOKIE_NAME, token, getCookieOptions());
+
+    // 8. Return safe user response
+    return res.status(200).json({
+      success: true,
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        authProvider: user.authProvider
+      }
+    });
+  } catch (error) {
+    console.error('[AUTH LOGIN ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Something went wrong while processing your login request'
+    });
+  }
+});
+
+/**
+ * POST /api/auth/logout
+ * Invalidate session by clearing the authentication cookie
+ */
+router.post('/logout', (req, res) => {
+  const isProduction = process.env.NODE_ENV === 'production';
+  res.clearCookie(COOKIE_NAME, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'strict' : 'lax',
+    path: '/'
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: 'Logged out successfully'
+  });
 });
 
 module.exports = router;

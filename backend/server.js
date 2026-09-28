@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
+const cookieParser = require('cookie-parser');
 const connectDB = require('./config/db');
 const missionsRouter = require('./routes/missions');
 const authRouter = require('./routes/authRoutes');
@@ -33,6 +34,7 @@ const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(express.json());
+app.use(cookieParser());
 
 // CORS configuration restricted to development frontend origin
 const ALLOWED_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173'];
@@ -43,6 +45,7 @@ app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', origin || 'http://localhost:5173');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    res.header('Access-Control-Allow-Credentials', 'true');
   }
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
