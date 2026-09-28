@@ -4,7 +4,6 @@ import Topbar from './components/Topbar';
 import NexoraCore from './components/NexoraCore';
 import TechnicalLabel from './components/TechnicalLabel';
 import GlassPanel from './components/GlassPanel';
-import StatusIndicator from './components/StatusIndicator';
 
 export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -74,10 +73,15 @@ export default function App() {
         body: JSON.stringify({ objective: trimmed }),
       });
 
-      const data = await response.json();
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        throw new Error(`Server returned unexpected non-JSON response (HTTP ${response.status})`);
+      }
 
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || `Server responded with status ${response.status}`);
+      if (!response.ok || !data || !data.success || !data.mission || typeof data.mission !== 'object' || !data.mission.id) {
+        throw new Error(data?.error || `Server responded with status ${response.status}`);
       }
 
       setCreatedMission(data.mission);
@@ -129,7 +133,7 @@ export default function App() {
     {
       label: 'PROCESSING',
       value: createdMission ? 'QUEUED' : 'STANDBY',
-      tag: createdMission ? `ID: ${createdMission.id.slice(0, 10)}` : 'QUEUE 0',
+      tag: createdMission?.id ? `ID: ${createdMission.id.slice(0, 10)}` : 'QUEUE 0',
       color: createdMission ? 'text-[#39FF88]' : 'text-[#B8ADBF]',
       dot: createdMission ? 'bg-[#39FF88]' : 'bg-[#6D28D9]',
       isSuccess: !!createdMission,
@@ -390,7 +394,7 @@ export default function App() {
                         Mission ID
                       </span>
                       <span className="text-xs font-mono font-bold text-[#E9D5FF] select-all truncate block">
-                        {createdMission.id}
+                        {createdMission?.id || 'PENDING'}
                       </span>
                     </div>
                     <div>
@@ -399,7 +403,7 @@ export default function App() {
                       </span>
                       <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase bg-[rgba(57,255,136,0.1)] border border-[rgba(57,255,136,0.25)] text-[#39FF88]">
                         <span className="h-1.5 w-1.5 rounded-full bg-[#39FF88] shadow-[0_0_4px_#39FF88]" />
-                        {createdMission.status.toUpperCase()}
+                        {createdMission?.status ? createdMission.status.toUpperCase() : 'QUEUED'}
                       </span>
                     </div>
                     <div>
@@ -407,7 +411,7 @@ export default function App() {
                         Queued At
                       </span>
                       <span className="text-xs font-mono text-[#B8ADBF] block">
-                        {new Date(createdMission.createdAt).toLocaleTimeString()}
+                        {createdMission?.createdAt ? new Date(createdMission.createdAt).toLocaleTimeString() : 'JUST NOW'}
                       </span>
                     </div>
                   </div>
@@ -419,7 +423,7 @@ export default function App() {
                       <span className="text-[10px] font-mono text-[#554C5C]">ASSIGNED_DIRECTIVE</span>
                     </div>
                     <p className="text-xs sm:text-sm font-mono text-[#F5F1FA] whitespace-pre-wrap leading-relaxed">
-                      {createdMission.objective}
+                      {createdMission?.objective || missionDirective}
                     </p>
                   </div>
 
@@ -509,7 +513,7 @@ export default function App() {
                           <span className="text-[10px] font-mono text-[#554C5C]">AUTONOMOUS_PIPELINE</span>
                         </div>
                         <span className="text-[9px] font-mono text-[#554C5C]">
-                          Ctrl+Enter to dispatch
+                          Ctrl+Enter / ⌘+Enter to dispatch
                         </span>
                       </div>
                       <textarea
