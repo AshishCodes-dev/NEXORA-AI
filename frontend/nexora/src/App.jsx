@@ -159,28 +159,28 @@ export default function App() {
   return (
     <div className="relative min-h-screen w-full bg-[#010202] text-[#F5F1FA] flex overflow-x-hidden selection:bg-[#A855F7]/30 selection:text-[#E9D5FF]">
       {/* ============================================================== */}
-      {/* 1. TECHNICAL GRID ENVIRONMENT & SINGLE ATMOSPHERIC VIOLET SOURCE */}
+      {/* 1. TECHNICAL GRID ENVIRONMENT & ATMOSPHERIC LIGHTING           */}
       {/* ============================================================== */}
       <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
-        {/* Major Atmospheric Violet Energy Source (Centered on NEXORA Core) */}
-        <div className="absolute top-[28%] left-1/2 -translate-x-1/2 -translate-y-1/2 w-[720px] h-[520px] bg-gradient-to-b from-[#A855F7]/[0.055] via-[#6D28D9]/[0.02] to-transparent blur-[160px] rounded-full" />
+        {/* Ambient Radial Illumination (Soft focal glow matching inspiration) */}
+        <div className="absolute top-[28%] left-1/2 -translate-x-1/2 -translate-y-1/2 w-[840px] h-[580px] bg-gradient-to-b from-[#A855F7]/[0.065] via-[#6D28D9]/[0.025] to-transparent blur-[160px] rounded-full pointer-events-none" />
 
-        {/* Technical Coordinate Grid with Radial Fade Around the Core */}
+        {/* Subtle Technical Grid Background (Continuous, crisp 1px lines inspired by reference image) */}
         <div
-          className="absolute inset-0 opacity-[0.03]"
+          className="absolute inset-0"
           style={{
             backgroundImage: `
-              linear-gradient(to right, rgba(168, 85, 247, 0.4) 1px, transparent 1px),
-              linear-gradient(to bottom, rgba(168, 85, 247, 0.4) 1px, transparent 1px)
+              linear-gradient(to right, rgba(168, 85, 247, 0.085) 1px, transparent 1px),
+              linear-gradient(to bottom, rgba(168, 85, 247, 0.085) 1px, transparent 1px)
             `,
-            backgroundSize: '64px 64px',
-            maskImage: 'radial-gradient(circle at 50% 28%, transparent 16%, black 48%, black 75%, transparent 95%)',
-            WebkitMaskImage: 'radial-gradient(circle at 50% 28%, transparent 16%, black 48%, black 75%, transparent 95%)',
+            backgroundSize: '72px 72px',
+            maskImage: 'radial-gradient(ellipse 92% 88% at 50% 28%, black 55%, rgba(0, 0, 0, 0.45) 85%, transparent 100%)',
+            WebkitMaskImage: 'radial-gradient(ellipse 92% 88% at 50% 28%, black 55%, rgba(0, 0, 0, 0.45) 85%, transparent 100%)',
           }}
         />
 
-        {/* Subtle Atmospheric Depth Vignette */}
-        <div className="absolute inset-0 bg-gradient-to-b from-[#010202]/60 via-transparent to-[#010202]/95" />
+        {/* Cinematic Vignette for Edge Depth */}
+        <div className="absolute inset-0 bg-gradient-to-b from-[#010202]/30 via-transparent to-[#010202]/85 pointer-events-none" />
       </div>
 
       {/* ============================================================== */}
