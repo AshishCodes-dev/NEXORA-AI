@@ -1,16 +1,23 @@
 const express = require('express');
-const crypto = require('crypto');
+const Mission = require('../models/Mission');
 
 const router = express.Router();
 
-// In-memory mission store
-const missions = [];
+/**
+ * Helper to format Mission document cleanly without leaking MongoDB internals
+ */
+const formatMission = (doc) => ({
+  id: doc._id.toString(),
+  objective: doc.objective,
+  status: doc.status,
+  createdAt: doc.createdAt ? doc.createdAt.toISOString() : new Date().toISOString()
+});
 
 /**
  * POST /api/missions
- * Creates and queues a new mission
+ * Creates and persists a new mission in MongoDB
  */
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   const { objective } = req.body || {};
 
   // Validation: objective must exist and be a string
@@ -32,32 +39,44 @@ router.post('/', (req, res) => {
     });
   }
 
-  // Generate unique mission
-  const mission = {
-    id: `nx_${crypto.randomUUID()}`,
-    objective: trimmedObjective,
-    status: 'queued',
-    createdAt: new Date().toISOString()
-  };
+  try {
+    const mission = await Mission.create({
+      objective: trimmedObjective,
+      status: 'queued'
+    });
 
-  missions.push(mission);
-
-  return res.status(201).json({
-    success: true,
-    mission
-  });
+    return res.status(201).json({
+      success: true,
+      mission: formatMission(mission)
+    });
+  } catch (error) {
+    console.error('[MISSIONS ROUTE ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to persist mission directive. Database storage error.'
+    });
+  }
 });
 
 /**
  * GET /api/missions
- * Retrieves all in-memory missions (telemetry & inspection)
+ * Retrieves all persisted missions from MongoDB
  */
-router.get('/', (req, res) => {
-  return res.status(200).json({
-    success: true,
-    count: missions.length,
-    missions
-  });
+router.get('/', async (req, res) => {
+  try {
+    const missions = await Mission.find().sort({ createdAt: -1 });
+    return res.status(200).json({
+      success: true,
+      count: missions.length,
+      missions: missions.map(formatMission)
+    });
+  } catch (error) {
+    console.error('[MISSIONS ROUTE ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve persisted missions.'
+    });
+  }
 });
 
 module.exports = router;
