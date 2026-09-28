@@ -3,6 +3,7 @@ const fs = require('fs');
 const express = require('express');
 const connectDB = require('./config/db');
 const missionsRouter = require('./routes/missions');
+const authRouter = require('./routes/authRoutes');
 
 // 1. Load environment variables
 const envPath = path.resolve(__dirname, '.env');
@@ -59,6 +60,9 @@ app.get('/api/health', (req, res) => {
 
 // Missions routes
 app.use('/api/missions', missionsRouter);
+
+// Authentication routes
+app.use('/api/auth', authRouter);
 
 // 2 & 3. Connect to MongoDB and start Express server only after successful DB connection
 async function startServer() {
