@@ -1,3 +1,4 @@
+import { motion } from 'motion/react';
 import StatusIndicator from './StatusIndicator';
 
 export default function Topbar({ onToggleSidebar, backendConnected = true }) {
@@ -6,16 +7,18 @@ export default function Topbar({ onToggleSidebar, backendConnected = true }) {
       {/* Left Section: Mobile Toggle + Title + Status */}
       <div className="flex items-center gap-3 sm:gap-5">
         {/* Mobile Hamburger Button */}
-        <button
+        <motion.button
           type="button"
           onClick={onToggleSidebar}
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
           className="md:hidden p-2 rounded-lg text-[#756B7D] hover:text-[#F5F1FA] hover:bg-[#050508] border border-[rgba(168,85,247,0.10)] transition-colors cursor-pointer"
           aria-label="Open sidebar"
         >
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h16" />
           </svg>
-        </button>
+        </motion.button>
 
         {/* Workspace Title & Sector Tag */}
         <div>
@@ -51,14 +54,19 @@ export default function Topbar({ onToggleSidebar, backendConnected = true }) {
         </div>
 
         {/* User / Operator Avatar Placeholder */}
-        <div className="relative cursor-pointer group">
+        <motion.div
+          whileHover={{ scale: 1.04 }}
+          whileTap={{ scale: 0.96 }}
+          transition={{ type: 'spring', stiffness: 400, damping: 25 }}
+          className="relative cursor-pointer group"
+        >
           <div className="h-9 w-9 rounded-lg bg-[#050508] border border-[rgba(168,85,247,0.12)] p-[2px] transition-all duration-200 group-hover:border-[rgba(192,132,252,0.4)] group-hover:shadow-[0_0_12px_rgba(168,85,247,0.15)] flex items-center justify-center">
             <div className="h-full w-full rounded-md bg-[#020203] flex items-center justify-center">
               <span className="text-xs font-mono font-bold text-[#C084FC]">OP</span>
             </div>
           </div>
           <span className="absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full bg-[#39FF88] ring-2 ring-[#020203]" />
-        </div>
+        </motion.div>
       </div>
     </header>
   );

@@ -1,3 +1,5 @@
+import { motion } from 'motion/react';
+
 export default function Sidebar({ isOpen, onClose }) {
   const navItems = [
     {
@@ -110,10 +112,13 @@ export default function Sidebar({ isOpen, onClose }) {
 
           <nav className="space-y-1.5">
             {navItems.map((item) => (
-              <button
+              <motion.button
                 key={item.name}
                 type="button"
-                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 cursor-pointer ${
+                whileHover={{ x: 2 }}
+                whileTap={{ scale: 0.985 }}
+                transition={{ type: 'spring', stiffness: 450, damping: 25 }}
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-sm font-medium transition-colors duration-200 cursor-pointer ${
                   item.active
                     ? 'bg-[#07060B] text-[#F5F1FA] border border-[rgba(192,132,252,0.38)] border-l-2 border-l-[#A855F7] shadow-[0_0_12px_rgba(168,85,247,0.10)]'
                     : 'text-[#756B7D] hover:text-[#B8ADBF] hover:bg-[#050508] hover:border-[rgba(168,85,247,0.08)] border border-transparent'
@@ -134,7 +139,7 @@ export default function Sidebar({ isOpen, onClose }) {
                 >
                   {item.tag}
                 </span>
-              </button>
+              </motion.button>
             ))}
           </nav>
         </div>
@@ -150,9 +155,12 @@ export default function Sidebar({ isOpen, onClose }) {
             </span>
           </div>
 
-          <button
+          <motion.button
             type="button"
-            className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-xs font-mono text-[#756B7D] hover:text-[#F5F1FA] hover:bg-[#050508] border border-transparent hover:border-[rgba(168,85,247,0.08)] transition-all duration-200 cursor-pointer"
+            whileHover={{ x: 2 }}
+            whileTap={{ scale: 0.985 }}
+            transition={{ type: 'spring', stiffness: 450, damping: 25 }}
+            className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-xs font-mono text-[#756B7D] hover:text-[#F5F1FA] hover:bg-[#050508] border border-transparent hover:border-[rgba(168,85,247,0.08)] transition-colors duration-200 cursor-pointer"
           >
             <div className="flex items-center gap-2.5">
               <svg className="w-4 h-4 text-[#756B7D]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.75">
@@ -162,7 +170,7 @@ export default function Sidebar({ isOpen, onClose }) {
               <span>SETTINGS</span>
             </div>
             <span className="text-[9px] text-[#554C5C]">CONFIG</span>
-          </button>
+          </motion.button>
         </div>
       </aside>
     </>
