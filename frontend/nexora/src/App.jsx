@@ -6,6 +6,7 @@ import NexoraCore from './components/NexoraCore';
 import TechnicalLabel from './components/TechnicalLabel';
 import GlassPanel from './components/GlassPanel';
 import MotionPage from './components/MotionPage';
+import NexoraBootSequence from './components/NexoraBootSequence';
 import { staggerContainer, staggerItem, fadeIn } from './motion/variants';
 import { springs } from './motion/transitions';
 
@@ -13,6 +14,29 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [coreState, setCoreState] = useState('executing');
   const [missionDirective, setMissionDirective] = useState('');
+
+  // Session-Aware Boot Sequence State (Runs once per browser session)
+  const [isBooting, setIsBooting] = useState(() => {
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        return window.sessionStorage.getItem('nexora_boot_complete') !== 'true';
+      }
+    } catch {
+      // In case of restricted iframe or strict cookie policy
+    }
+    return true;
+  });
+
+  const handleBootComplete = () => {
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        window.sessionStorage.setItem('nexora_boot_complete', 'true');
+      }
+    } catch {
+      // Ignore storage exception
+    }
+    setIsBooting(false);
+  };
 
   // Mission Submission & Lifecycle State
   const [submissionState, setSubmissionState] = useState('idle'); // 'idle' | 'processing' | 'success' | 'error'
@@ -229,6 +253,13 @@ export default function App() {
 
   return (
     <MotionConfig reducedMotion="user">
+      {/* Full-screen Cinematic Boot Sequence (Runs once per browser session) */}
+      <AnimatePresence>
+        {isBooting && (
+          <NexoraBootSequence key="nexora-boot" onComplete={handleBootComplete} />
+        )}
+      </AnimatePresence>
+
       <div className="relative min-h-screen w-full bg-[#010202] text-[#F5F1FA] flex overflow-x-hidden selection:bg-[#A855F7]/30 selection:text-[#E9D5FF]">
         {/* ============================================================== */}
         {/* 1. TECHNICAL GRID ENVIRONMENT & ATMOSPHERIC LIGHTING           */}
