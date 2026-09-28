@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const authMiddleware = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
@@ -234,6 +235,40 @@ router.post('/logout', (req, res) => {
     success: true,
     message: 'Logged out successfully'
   });
+});
+
+/**
+ * GET /api/auth/me
+ * Retrieves current authenticated user profile from verified session cookie
+ */
+router.get('/me', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+
+    // If the token was valid but the user was deleted from the database
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        authProvider: user.authProvider
+      }
+    });
+  } catch (error) {
+    console.error('[AUTH ME ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Something went wrong while retrieving user profile'
+    });
+  }
 });
 
 module.exports = router;
