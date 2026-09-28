@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence, MotionConfig } from 'motion/react';
 import Sidebar from './components/Sidebar';
 import Topbar from './components/Topbar';
@@ -7,13 +7,27 @@ import TechnicalLabel from './components/TechnicalLabel';
 import GlassPanel from './components/GlassPanel';
 import MotionPage from './components/MotionPage';
 import NexoraBootSequence from './components/NexoraBootSequence';
+import AgentModuleCard from './components/AgentModuleCard';
+import { MISSION_STATES, STATE_CONFIG, STATE_ORDER } from './constants/missionStates';
 import { staggerContainer, staggerItem, fadeIn } from './motion/variants';
 import { springs } from './motion/transitions';
 
 export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [coreState, setCoreState] = useState('executing');
   const [missionDirective, setMissionDirective] = useState('');
+
+  // Autonomous System State Model (Task 1 & Task 4)
+  const [systemState, setSystemState] = useState(MISSION_STATES.IDLE);
+  const demoTimerRef = useRef(null);
+  const currentConfig = STATE_CONFIG[systemState] || STATE_CONFIG[MISSION_STATES.IDLE];
+  const coreState = currentConfig.coreState;
+
+  // Cleanup demo timer on unmount
+  useEffect(() => {
+    return () => {
+      if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
+    };
+  }, []);
 
   // Session-Aware Boot Sequence State (Runs once per browser session)
   const [isBooting, setIsBooting] = useState(() => {
@@ -59,11 +73,9 @@ export default function App() {
         const data = await response.json();
         setBackendHealth(data);
         setBackendConnected(true);
-        setCoreState('executing');
       } catch (err) {
         setBackendHealth({ status: 'offline', message: err.message });
         setBackendConnected(false);
-        setCoreState('idle');
       } finally {
         setBackendLoading(false);
       }
@@ -90,7 +102,7 @@ export default function App() {
 
     setSubmissionState('processing');
     setSubmissionError(null);
-    setCoreState('thinking');
+    setSystemState(MISSION_STATES.PLANNING);
 
     try {
       const response = await fetch('http://localhost:5000/api/missions', {
@@ -114,7 +126,13 @@ export default function App() {
 
       setCreatedMission(data.mission);
       setSubmissionState('success');
-      setCoreState('executing');
+      setSystemState(MISSION_STATES.PLANNING);
+
+      // Clean isolated demonstration state sequence (Task 9)
+      if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
+      demoTimerRef.current = setTimeout(() => {
+        setSystemState(MISSION_STATES.RESEARCHING);
+      }, 3000);
     } catch (err) {
       const errorMessage =
         err.message === 'Failed to fetch' || err.name === 'TypeError'
@@ -122,49 +140,53 @@ export default function App() {
           : err.message || 'Mission initialization failed. Please retry.';
       setSubmissionError(errorMessage);
       setSubmissionState('error');
-      setCoreState('idle');
+      setSystemState(MISSION_STATES.IDLE);
     }
   };
 
   // Reset Composer for New Mission
   const handleResetMission = () => {
+    if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
     setSubmissionState('idle');
     setMissionDirective('');
     setCreatedMission(null);
     setSubmissionError(null);
+    setSystemState(MISSION_STATES.IDLE);
   };
 
-  // System Telemetry Metrics
+  // System Telemetry Metrics (Derived from systemState, Task 5)
   const systemTelemetry = [
     {
       label: 'MISSION ENGINE',
-      value: createdMission ? 'ACTIVE' : 'AUTONOMOUS',
-      tag: createdMission ? 'ENCLAVE 01' : 'V4.2',
-      color: 'text-[#E9D5FF]',
-      dot: 'bg-[#A855F7]',
+      value: currentConfig.engineStatus,
+      tag: createdMission ? 'DISPATCHED' : 'ENCLAVE 01',
+      color: currentConfig.engineStatus === 'ACTIVE' ? 'text-[#39FF88]' : 'text-[#E9D5FF]',
+      dot: currentConfig.engineStatus === 'ACTIVE' ? 'bg-[#39FF88]' : 'bg-[#A855F7]',
+      isSuccess: currentConfig.engineStatus === 'ACTIVE',
     },
     {
-      label: 'AGENTS READY',
-      value: '06 / 06',
-      tag: 'CLUSTER ONLINE',
-      color: 'text-[#C084FC]',
-      dot: 'bg-[#C084FC]',
+      label: 'ACTIVE AGENT',
+      value: currentConfig.activeAgentName,
+      tag: currentConfig.activeAgentId ? currentConfig.activeAgentId : 'CLUSTER ONLINE',
+      color: currentConfig.activeAgentId ? 'text-[#C084FC]' : 'text-[#756B7D]',
+      dot: currentConfig.activeAgentId ? 'bg-[#C084FC]' : 'bg-[#554C5C]',
+      isSuccess: !!currentConfig.activeAgentId,
     },
     {
-      label: 'SYSTEM STATUS',
-      value: backendConnected ? 'ONLINE' : 'STANDBY',
-      tag: backendConnected ? 'PORT 5000' : 'LOCAL CORE',
-      color: 'text-[#F5F1FA]',
-      dot: backendConnected ? 'bg-[#39FF88]' : 'bg-[#A855F7]',
-      isSuccess: backendConnected,
+      label: 'TASK QUEUE',
+      value: currentConfig.taskQueue,
+      tag: `STATE: ${currentConfig.label}`,
+      color: currentConfig.processing === 'YES' ? 'text-[#F5F1FA]' : 'text-[#756B7D]',
+      dot: currentConfig.processing === 'YES' ? 'bg-[#A855F7]' : 'bg-[#554C5C]',
+      isSuccess: currentConfig.processing === 'YES',
     },
     {
       label: 'PROCESSING',
-      value: createdMission ? 'QUEUED' : 'STANDBY',
-      tag: createdMission?.id ? `ID: ${createdMission.id.slice(0, 10)}` : 'QUEUE 0',
-      color: createdMission ? 'text-[#39FF88]' : 'text-[#B8ADBF]',
-      dot: createdMission ? 'bg-[#39FF88]' : 'bg-[#6D28D9]',
-      isSuccess: !!createdMission,
+      value: currentConfig.processing,
+      tag: backendConnected ? 'LINKED // PORT 5000' : 'STANDBY // LOCAL',
+      color: currentConfig.processing === 'YES' ? 'text-[#39FF88]' : 'text-[#B8ADBF]',
+      dot: currentConfig.processing === 'YES' ? 'bg-[#39FF88]' : 'bg-[#6D28D9]',
+      isSuccess: currentConfig.processing === 'YES',
     },
   ];
 
@@ -177,6 +199,7 @@ export default function App() {
       status: 'ONLINE',
       state: 'ready',
       activity: 'Knowledge graph indexed',
+      activeActivity: 'Retrieving semantic intelligence vectors',
       icon: (
         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.75">
           <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
@@ -190,6 +213,7 @@ export default function App() {
       status: 'READY',
       state: 'ready',
       activity: 'Headless runtime ready',
+      activeActivity: 'Exploring web and DOM telemetry endpoints',
       icon: (
         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.75">
           <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-.778.099-1.533.284-2.253" />
@@ -203,6 +227,7 @@ export default function App() {
       status: 'STANDBY',
       state: 'idle',
       activity: 'Neural buffer clear',
+      activeActivity: 'Synthesizing reasoning & decomposing task graph',
       icon: (
         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.75">
           <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5m.75-9l3-3 2.25 2.25L15 6" />
@@ -216,6 +241,7 @@ export default function App() {
       status: 'STANDBY',
       state: 'idle',
       activity: 'Consistency rules loaded',
+      activeActivity: 'Auditing logic constraints & safety assertions',
       icon: (
         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.75">
           <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
@@ -229,6 +255,7 @@ export default function App() {
       status: 'READY',
       state: 'ready',
       activity: 'Workspace sandbox primed',
+      activeActivity: 'Synthesizing code artifacts and sandbox targets',
       icon: (
         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.75">
           <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
@@ -242,6 +269,7 @@ export default function App() {
       status: 'STANDBY',
       state: 'idle',
       activity: 'Harness standby',
+      activeActivity: 'Running test harness & assertion validations',
       icon: (
         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.75">
           <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6a7.5 7.5 0 107.5 7.5h-7.5V6z" />
@@ -362,9 +390,9 @@ export default function App() {
                   <NexoraCore state={coreState} size="md" />
 
                   {/* Micro Status Chip */}
-                  <div className="absolute -bottom-1 left-1/2 -translate-x-1/2">
-                    <TechnicalLabel variant={backendConnected ? 'primary' : 'default'} size="xs">
-                      {backendConnected ? 'CORE ONLINE // LINKED' : 'CORE STANDBY // LOCAL'}
+                  <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 whitespace-nowrap">
+                    <TechnicalLabel variant={currentConfig.processing === 'YES' ? 'primary' : 'default'} size="xs">
+                      {`STATE // ${currentConfig.label}`}
                     </TechnicalLabel>
                   </div>
                 </div>
@@ -379,25 +407,33 @@ export default function App() {
                   </p>
                 </div>
 
-                {/* State Previewer Switcher */}
-                <div className="mt-4 flex flex-wrap items-center justify-center gap-1.5">
-                  {['idle', 'thinking', 'executing', 'verifying'].map((st) => (
-                    <motion.button
-                      key={st}
-                      type="button"
-                      whileHover={{ scale: 1.04 }}
-                      whileTap={{ scale: 0.96 }}
-                      transition={springs.tactile}
-                      onClick={() => setCoreState(st)}
-                      className={`text-[9px] font-mono uppercase px-2 py-0.5 rounded border transition-colors cursor-pointer ${
-                        coreState === st
-                          ? 'border-[rgba(192,132,252,0.4)] text-[#E9D5FF] bg-[#090710] shadow-[0_0_8px_rgba(168,85,247,0.15)]'
-                          : 'border-[rgba(168,85,247,0.08)] text-[#554C5C] hover:text-[#B8ADBF] bg-[#020203]'
-                      }`}
-                    >
-                      {st}
-                    </motion.button>
-                  ))}
+                {/* State Previewer Switcher (Task 1 & Task 14) */}
+                <div className="mt-4 w-full px-2">
+                  <div className="text-[8.5px] font-mono text-[#554C5C] text-center mb-1.5 uppercase tracking-wider">
+                    AUTONOMOUS STATE PREVIEWER
+                  </div>
+                  <div className="flex flex-wrap items-center justify-center gap-1">
+                    {STATE_ORDER.map((st) => (
+                      <motion.button
+                        key={st}
+                        type="button"
+                        whileHover={{ scale: 1.04 }}
+                        whileTap={{ scale: 0.96 }}
+                        transition={springs.tactile}
+                        onClick={() => {
+                          if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
+                          setSystemState(st);
+                        }}
+                        className={`text-[8.5px] font-mono uppercase px-2 py-0.5 rounded border transition-colors cursor-pointer ${
+                          systemState === st
+                            ? 'border-[rgba(192,132,252,0.5)] text-[#E9D5FF] bg-[#120B20] shadow-[0_0_8px_rgba(168,85,247,0.22)]'
+                            : 'border-[rgba(168,85,247,0.08)] text-[#554C5C] hover:text-[#B8ADBF] bg-[#020203]'
+                        }`}
+                      >
+                        {st}
+                      </motion.button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
@@ -486,30 +522,82 @@ export default function App() {
                         <div className="p-3 rounded-lg bg-[#050508]/80 border border-[rgba(168,85,247,0.08)] mb-4">
                           <div className="flex items-center justify-between text-[9px] font-mono text-[#554C5C] mb-2 uppercase tracking-wider">
                             <span>Autonomous Execution Pipeline</span>
-                            <span className="text-[#39FF88]">Mission Queued</span>
+                            <span className="text-[#39FF88]">
+                              {`STATE: ${currentConfig.label}`}
+                            </span>
                           </div>
                           <div className="flex items-center gap-1.5 overflow-x-auto text-[10px] font-mono py-0.5 scrollbar-thin">
-                            <span className="px-2 py-0.5 rounded bg-[rgba(57,255,136,0.15)] text-[#39FF88] border border-[rgba(57,255,136,0.3)] font-bold shrink-0">
+                            <span className={`px-2 py-0.5 rounded border shrink-0 transition-colors ${
+                              systemState === MISSION_STATES.IDLE
+                                ? 'bg-[rgba(57,255,136,0.15)] text-[#39FF88] border-[rgba(57,255,136,0.3)] font-bold'
+                                : 'bg-[#050508] text-[#756B7D] border-[rgba(168,85,247,0.08)]'
+                            }`}>
                               MISSION
                             </span>
                             <span className="text-[#554C5C] shrink-0">→</span>
-                            <span className="px-2 py-0.5 rounded bg-[#090710] text-[#A855F7] border border-[rgba(168,85,247,0.2)] shrink-0">
+                            <span className={`px-2 py-0.5 rounded border shrink-0 transition-colors ${
+                              systemState === MISSION_STATES.PLANNING
+                                ? 'bg-[#090710] text-[#C084FC] border-[rgba(192,132,252,0.4)] shadow-[0_0_8px_rgba(168,85,247,0.2)] font-bold'
+                                : 'bg-[#020203] text-[#756B7D] border-[rgba(168,85,247,0.08)]'
+                            }`}>
                               PLANNER
                             </span>
                             <span className="text-[#554C5C] shrink-0">→</span>
-                            <span className="px-2 py-0.5 rounded bg-[#020203] text-[#756B7D] shrink-0">TASKS</span>
+                            <span className={`px-2 py-0.5 rounded border shrink-0 transition-colors ${
+                              systemState === MISSION_STATES.PLANNING
+                                ? 'bg-[#090710] text-[#E9D5FF] border-[rgba(192,132,252,0.3)] font-bold'
+                                : 'bg-[#020203] text-[#756B7D] border-[rgba(168,85,247,0.08)]'
+                            }`}>
+                              TASKS
+                            </span>
                             <span className="text-[#554C5C] shrink-0">→</span>
-                            <span className="px-2 py-0.5 rounded bg-[#020203] text-[#756B7D] shrink-0">AGENTS</span>
+                            <span className={`px-2 py-0.5 rounded border shrink-0 transition-colors ${
+                              systemState === MISSION_STATES.RESEARCHING || systemState === MISSION_STATES.ANALYZING
+                                ? 'bg-[#090710] text-[#C084FC] border-[rgba(192,132,252,0.4)] shadow-[0_0_8px_rgba(168,85,247,0.2)] font-bold'
+                                : 'bg-[#020203] text-[#756B7D] border-[rgba(168,85,247,0.08)]'
+                            }`}>
+                              AGENTS
+                            </span>
                             <span className="text-[#554C5C] shrink-0">→</span>
-                            <span className="px-2 py-0.5 rounded bg-[#020203] text-[#756B7D] shrink-0">EVIDENCE</span>
+                            <span className={`px-2 py-0.5 rounded border shrink-0 transition-colors ${
+                              systemState === MISSION_STATES.ANALYZING
+                                ? 'bg-[#090710] text-[#C084FC] border-[rgba(192,132,252,0.4)] font-bold'
+                                : 'bg-[#020203] text-[#756B7D] border-[rgba(168,85,247,0.08)]'
+                            }`}>
+                              EVIDENCE
+                            </span>
                             <span className="text-[#554C5C] shrink-0">→</span>
-                            <span className="px-2 py-0.5 rounded bg-[#020203] text-[#756B7D] shrink-0">CRITIC</span>
+                            <span className={`px-2 py-0.5 rounded border shrink-0 transition-colors ${
+                              systemState === MISSION_STATES.VERIFYING
+                                ? 'bg-[#090710] text-[#C084FC] border-[rgba(192,132,252,0.4)] shadow-[0_0_8px_rgba(168,85,247,0.2)] font-bold'
+                                : 'bg-[#020203] text-[#756B7D] border-[rgba(168,85,247,0.08)]'
+                            }`}>
+                              CRITIC
+                            </span>
                             <span className="text-[#554C5C] shrink-0">→</span>
-                            <span className="px-2 py-0.5 rounded bg-[#020203] text-[#756B7D] shrink-0">BUILDER</span>
+                            <span className={`px-2 py-0.5 rounded border shrink-0 transition-colors ${
+                              systemState === MISSION_STATES.BUILDING
+                                ? 'bg-[#090710] text-[#C084FC] border-[rgba(192,132,252,0.4)] shadow-[0_0_8px_rgba(168,85,247,0.2)] font-bold'
+                                : 'bg-[#020203] text-[#756B7D] border-[rgba(168,85,247,0.08)]'
+                            }`}>
+                              BUILDER
+                            </span>
                             <span className="text-[#554C5C] shrink-0">→</span>
-                            <span className="px-2 py-0.5 rounded bg-[#020203] text-[#756B7D] shrink-0">QA</span>
+                            <span className={`px-2 py-0.5 rounded border shrink-0 transition-colors ${
+                              systemState === MISSION_STATES.QA
+                                ? 'bg-[#090710] text-[#39FF88] border-[rgba(57,255,136,0.4)] shadow-[0_0_8px_rgba(57,255,136,0.2)] font-bold'
+                                : 'bg-[#020203] text-[#756B7D] border-[rgba(168,85,247,0.08)]'
+                            }`}>
+                              QA
+                            </span>
                             <span className="text-[#554C5C] shrink-0">→</span>
-                            <span className="px-2 py-0.5 rounded bg-[#020203] text-[#756B7D] shrink-0">RESULT</span>
+                            <span className={`px-2 py-0.5 rounded border shrink-0 transition-colors ${
+                              systemState === MISSION_STATES.COMPLETE
+                                ? 'bg-[rgba(57,255,136,0.15)] text-[#39FF88] border-[rgba(57,255,136,0.35)] shadow-[0_0_8px_rgba(57,255,136,0.25)] font-bold'
+                                : 'bg-[#020203] text-[#756B7D] border-[rgba(168,85,247,0.08)]'
+                            }`}>
+                              RESULT
+                            </span>
                           </div>
                         </div>
                       </div>
@@ -699,7 +787,7 @@ export default function App() {
                 </span>
               </div>
 
-              {/* 6 Connected Modules Grid */}
+              {/* 6 Connected Modules Grid (Task 3, 4, 8 & 10) */}
               <motion.div
                 variants={staggerContainer(0.05, 0.08)}
                 initial="initial"
@@ -707,52 +795,13 @@ export default function App() {
                 className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"
               >
                 {agentModules.map((agent) => (
-                  <motion.div
-                    key={agent.name}
-                    variants={staggerItem}
-                    whileHover={{ y: -2 }}
-                    transition={springs.subtle}
-                  >
-                    <GlassPanel className="p-3.5 flex flex-col justify-between h-full">
-                      <div>
-                        {/* Module ID & Status Indicator */}
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-[9px] font-mono text-[#554C5C] tracking-wider">
-                            {agent.id}
-                          </span>
-                          <div className="flex items-center gap-1.5">
-                            <span className="h-1.5 w-1.5 rounded-full bg-[#A855F7] shadow-[0_0_5px_#A855F7]" />
-                            <span className="text-[9px] font-mono text-[#C084FC] uppercase tracking-wider font-semibold">
-                              {agent.status}
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* Agent Name & Icon */}
-                        <div className="flex items-center gap-2.5 mb-1.5">
-                          <div className="p-1.5 rounded bg-[#090710] border border-[rgba(168,85,247,0.12)] text-[#C084FC]">
-                            {agent.icon}
-                          </div>
-                          <h3 className="text-xs sm:text-sm font-mono font-bold text-[#F5F1FA] tracking-tight">
-                            {agent.name}
-                          </h3>
-                        </div>
-
-                        {/* Short Role */}
-                        <p className="text-[11px] font-mono text-[#756B7D] leading-snug mb-3">
-                          {agent.role}
-                        </p>
-                      </div>
-
-                      {/* Activity Telemetry Footer */}
-                      <div className="pt-2 border-t border-[rgba(168,85,247,0.08)] flex items-center justify-between text-[9px] font-mono text-[#554C5C]">
-                        <span>STATUS</span>
-                        <span className="text-[#B8ADBF] truncate max-w-[170px]">
-                          {agent.activity}
-                        </span>
-                      </div>
-                    </GlassPanel>
-                  </motion.div>
+                  <AgentModuleCard
+                    key={agent.id}
+                    agent={agent}
+                    isActive={currentConfig.activeAgentId === agent.id}
+                    isSecondary={currentConfig.secondaryAgentId === agent.id}
+                    activeStateLabel={currentConfig.activeAgentId === agent.id ? currentConfig.description : ''}
+                  />
                 ))}
               </motion.div>
             </div>

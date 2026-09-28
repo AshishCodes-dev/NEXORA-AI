@@ -1,8 +1,128 @@
+import { useReducedMotion } from 'motion/react';
+
+const statePresets = {
+  idle: {
+    bloomOpacity: 'opacity-30',
+    bloomGradient: 'rgba(168, 85, 247, 0.16) 0%, rgba(109, 40, 217, 0.08) 35%, transparent 75%',
+    orbitalDuration: '34s',
+    counterDuration: '42s',
+    pulseDuration: '4.8s',
+    nucleusColor: '#A855F7',
+    centerGlow: '#C084FC',
+    centerColor: '#E9D5FF',
+    reticleStroke: 'rgba(168, 85, 247, 0.10)',
+  },
+  planning: {
+    bloomOpacity: 'opacity-45',
+    bloomGradient: 'rgba(192, 132, 252, 0.22) 0%, rgba(168, 85, 247, 0.12) 35%, transparent 75%',
+    orbitalDuration: '22s',
+    counterDuration: '28s',
+    pulseDuration: '3.2s',
+    nucleusColor: '#A855F7',
+    centerGlow: '#C084FC',
+    centerColor: '#F5F1FA',
+    reticleStroke: 'rgba(192, 132, 252, 0.18)',
+  },
+  thinking: {
+    bloomOpacity: 'opacity-45',
+    bloomGradient: 'rgba(192, 132, 252, 0.22) 0%, rgba(168, 85, 247, 0.12) 35%, transparent 75%',
+    orbitalDuration: '22s',
+    counterDuration: '28s',
+    pulseDuration: '3.2s',
+    nucleusColor: '#A855F7',
+    centerGlow: '#C084FC',
+    centerColor: '#F5F1FA',
+    reticleStroke: 'rgba(192, 132, 252, 0.18)',
+  },
+  researching: {
+    bloomOpacity: 'opacity-55',
+    bloomGradient: 'rgba(192, 132, 252, 0.28) 0%, rgba(168, 85, 247, 0.16) 40%, transparent 80%',
+    orbitalDuration: '14s',
+    counterDuration: '18s',
+    pulseDuration: '2.2s',
+    nucleusColor: '#A855F7',
+    centerGlow: '#E9D5FF',
+    centerColor: '#FFFFFF',
+    reticleStroke: 'rgba(192, 132, 252, 0.25)',
+  },
+  executing: {
+    bloomOpacity: 'opacity-55',
+    bloomGradient: 'rgba(192, 132, 252, 0.28) 0%, rgba(168, 85, 247, 0.16) 40%, transparent 80%',
+    orbitalDuration: '14s',
+    counterDuration: '18s',
+    pulseDuration: '2.2s',
+    nucleusColor: '#A855F7',
+    centerGlow: '#E9D5FF',
+    centerColor: '#FFFFFF',
+    reticleStroke: 'rgba(192, 132, 252, 0.25)',
+  },
+  analyzing: {
+    bloomOpacity: 'opacity-45',
+    bloomGradient: 'rgba(168, 85, 247, 0.22) 0%, rgba(109, 40, 217, 0.12) 35%, transparent 75%',
+    orbitalDuration: '18s',
+    counterDuration: '24s',
+    pulseDuration: '2.5s',
+    nucleusColor: '#C084FC',
+    centerGlow: '#E9D5FF',
+    centerColor: '#FFFFFF',
+    reticleStroke: 'rgba(168, 85, 247, 0.22)',
+  },
+  verifying: {
+    bloomOpacity: 'opacity-50',
+    bloomGradient: 'rgba(192, 132, 252, 0.26) 0%, rgba(168, 85, 247, 0.14) 35%, transparent 75%',
+    orbitalDuration: '16s',
+    counterDuration: '20s',
+    pulseDuration: '1.8s',
+    nucleusColor: '#C084FC',
+    centerGlow: '#E9D5FF',
+    centerColor: '#FFFFFF',
+    reticleStroke: 'rgba(233, 213, 255, 0.35)',
+  },
+  building: {
+    bloomOpacity: 'opacity-60',
+    bloomGradient: 'rgba(192, 132, 252, 0.32) 0%, rgba(168, 85, 247, 0.18) 42%, transparent 80%',
+    orbitalDuration: '12s',
+    counterDuration: '16s',
+    pulseDuration: '1.9s',
+    nucleusColor: '#A855F7',
+    centerGlow: '#C084FC',
+    centerColor: '#FFFFFF',
+    reticleStroke: 'rgba(192, 132, 252, 0.30)',
+  },
+  qa: {
+    bloomOpacity: 'opacity-50',
+    bloomGradient: 'rgba(57, 255, 136, 0.16) 0%, rgba(168, 85, 247, 0.14) 35%, transparent 75%',
+    orbitalDuration: '18s',
+    counterDuration: '22s',
+    pulseDuration: '2.0s',
+    nucleusColor: '#A855F7',
+    centerGlow: '#39FF88',
+    centerColor: '#F5F1FA',
+    reticleStroke: 'rgba(57, 255, 136, 0.25)',
+  },
+  complete: {
+    bloomOpacity: 'opacity-55',
+    bloomGradient: 'rgba(57, 255, 136, 0.22) 0%, rgba(168, 85, 247, 0.14) 35%, transparent 80%',
+    orbitalDuration: '30s',
+    counterDuration: '36s',
+    pulseDuration: '3.8s',
+    nucleusColor: '#39FF88',
+    centerGlow: '#39FF88',
+    centerColor: '#FFFFFF',
+    reticleStroke: 'rgba(57, 255, 136, 0.30)',
+  },
+};
+
 export default function NexoraCore({
   state = 'executing',
   size = 'md',
   className = '',
 }) {
+  const prefersReducedMotion = useReducedMotion();
+  const normalizedKey = (state || 'idle').toLowerCase();
+  const config = statePresets[normalizedKey] || statePresets.idle;
+  const animationPlayState = prefersReducedMotion ? 'paused' : 'running';
+
   const sizeDimensions = {
     sm: 'w-44 h-44',
     md: 'w-60 h-60 sm:w-72 sm:h-72',
@@ -15,11 +135,11 @@ export default function NexoraCore({
         sizeDimensions[size] || sizeDimensions.md
       } ${className}`}
     >
-      {/* Refined Smooth Violet Atmospheric Bloom: Soft Violet Fading into Black */}
+      {/* Refined Smooth Violet Atmospheric Bloom: Dynamic Aura based on State */}
       <div
-        className="absolute inset-0 rounded-full blur-[80px] opacity-45 pointer-events-none transition-all duration-700"
+        className={`absolute inset-0 rounded-full blur-[80px] pointer-events-none transition-all duration-700 ${config.bloomOpacity}`}
         style={{
-          background: `radial-gradient(circle at 50% 50%, rgba(168, 85, 247, 0.22) 0%, rgba(109, 40, 217, 0.10) 35%, rgba(53, 20, 92, 0.04) 60%, transparent 80%)`,
+          background: `radial-gradient(circle at 50% 50%, ${config.bloomGradient})`,
         }}
       />
 
@@ -94,7 +214,13 @@ export default function NexoraCore({
         />
 
         {/* 3. Primary Orbital Ring: Clockwise Segmented Arcs */}
-        <g className="animate-spin-slow origin-center">
+        <g
+          className="animate-spin-slow origin-center"
+          style={{
+            animationDuration: config.orbitalDuration,
+            animationPlayState,
+          }}
+        >
           {/* Base Muted Track */}
           <circle
             cx="160"
@@ -131,7 +257,13 @@ export default function NexoraCore({
         </g>
 
         {/* 4. Secondary Counter-Rotating Telemetry Ring */}
-        <g className="animate-spin-reverse origin-center">
+        <g
+          className="animate-spin-reverse origin-center"
+          style={{
+            animationDuration: config.counterDuration,
+            animationPlayState,
+          }}
+        >
           <circle
             cx="160"
             cy="160"
@@ -157,13 +289,19 @@ export default function NexoraCore({
           cx="160"
           cy="160"
           r="68"
-          stroke="rgba(168, 85, 247, 0.10)"
+          stroke={config.reticleStroke}
           strokeWidth="0.8"
           strokeDasharray="3 6"
         />
 
         {/* 6. Pulsing Glowing Core Nucleus: Multi-layered Violet Containment */}
-        <g className="animate-core-pulse origin-center">
+        <g
+          className="animate-core-pulse origin-center"
+          style={{
+            animationDuration: config.pulseDuration,
+            animationPlayState,
+          }}
+        >
           {/* Outer Deep Violet Bloom Filter: #6D28D9 */}
           <circle
             cx="160"
@@ -199,7 +337,7 @@ export default function NexoraCore({
             cx="160"
             cy="160"
             r="19"
-            fill="#A855F7"
+            fill={config.nucleusColor}
             opacity="0.80"
           />
 
@@ -208,7 +346,7 @@ export default function NexoraCore({
             cx="160"
             cy="160"
             r="11"
-            fill="#C084FC"
+            fill={config.centerGlow}
             opacity="0.90"
           />
 
@@ -217,7 +355,7 @@ export default function NexoraCore({
             cx="160"
             cy="160"
             r="5.5"
-            fill="#E9D5FF"
+            fill={config.centerColor}
             opacity="0.98"
           />
         </g>
