@@ -9,6 +9,10 @@ import MotionPage from './components/MotionPage';
 import NexoraBootSequence from './components/NexoraBootSequence';
 import AgentModuleCard from './components/AgentModuleCard';
 import MissionComposer from './components/MissionComposer';
+import ExecutionFeed from './components/ExecutionFeed';
+import EvidenceStream from './components/EvidenceStream';
+import demoExecutionEngine from './services/demoExecutionEngine';
+import { INITIAL_EVIDENCE_MAP } from './constants/executionEvents';
 import { MISSION_STATES, STATE_CONFIG, STATE_ORDER } from './constants/missionStates';
 import { staggerContainer, staggerItem, fadeIn } from './motion/variants';
 import { springs } from './motion/transitions';
@@ -23,9 +27,10 @@ export default function App() {
   const currentConfig = STATE_CONFIG[systemState] || STATE_CONFIG[MISSION_STATES.IDLE];
   const coreState = currentConfig.coreState;
 
-  // Cleanup demo timer on unmount
+  // Cleanup demo timer and simulation engine on unmount
   useEffect(() => {
     return () => {
+      demoExecutionEngine.stop();
       if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
     };
   }, []);
@@ -58,6 +63,13 @@ export default function App() {
   const [submissionError, setSubmissionError] = useState(null);
   const [createdMission, setCreatedMission] = useState(null);
 
+  // Execution Telemetry & Evidence Streams (Step 5)
+  const [executionEvents, setExecutionEvents] = useState([]);
+  const [evidenceMap, setEvidenceMap] = useState(INITIAL_EVIDENCE_MAP);
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [activeAgentId, setActiveAgentId] = useState(null);
+  const [activeSecondaryAgentId, setActiveSecondaryAgentId] = useState(null);
+
   // Preserve working frontend-backend health check functionality
   const [backendHealth, setBackendHealth] = useState(null);
   const [backendLoading, setBackendLoading] = useState(true);
@@ -89,8 +101,8 @@ export default function App() {
   const handleRunMission = async (e) => {
     if (e) e.preventDefault();
 
-    // Prevent duplicate submission while already processing
-    if (submissionState === 'processing') return;
+    // Prevent duplicate submission while already processing or simulating (Task 13)
+    if (submissionState === 'processing' || isSimulating) return;
 
     const trimmed = missionDirective.trim();
 
@@ -127,13 +139,40 @@ export default function App() {
 
       setCreatedMission(data.mission);
       setSubmissionState('success');
-      setSystemState(MISSION_STATES.PLANNING);
+      setIsSimulating(true);
 
-      // Clean isolated demonstration state sequence (Task 9)
-      if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
-      demoTimerRef.current = setTimeout(() => {
-        setSystemState(MISSION_STATES.RESEARCHING);
-      }, 3000);
+      // Reset previous telemetry logs before starting fresh run
+      setExecutionEvents([]);
+      setEvidenceMap(INITIAL_EVIDENCE_MAP);
+
+      // Start the deterministic demo execution sequence (Task 2, 7 & 11)
+      demoExecutionEngine.start(data.mission, {
+        onEvent: (event) => {
+          setExecutionEvents((prev) => [...prev, event]);
+        },
+        onStateChange: (newState, primaryAgent, secondaryAgent) => {
+          setSystemState(newState);
+          setActiveAgentId(primaryAgent);
+          setActiveSecondaryAgentId(secondaryAgent);
+        },
+        onEvidenceUpdate: (update) => {
+          setEvidenceMap((prev) => ({
+            ...prev,
+            [update.category]: {
+              ...prev[update.category],
+              status: update.status,
+              placeholder: update.placeholder,
+              timeString: update.timeString,
+              lastUpdated: update.timestamp,
+            },
+          }));
+        },
+        onComplete: () => {
+          setIsSimulating(false);
+          setActiveAgentId(null);
+          setActiveSecondaryAgentId(null);
+        },
+      });
     } catch (err) {
       const errorMessage =
         err.message === 'Failed to fetch' || err.name === 'TypeError'
@@ -142,17 +181,25 @@ export default function App() {
       setSubmissionError(errorMessage);
       setSubmissionState('error');
       setSystemState(MISSION_STATES.IDLE);
+      setIsSimulating(false);
+      demoExecutionEngine.stop();
     }
   };
 
-  // Reset Composer for New Mission
+  // Reset Composer for New Mission (Task 12)
   const handleResetMission = () => {
+    demoExecutionEngine.stop();
     if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
     setSubmissionState('idle');
     setMissionDirective('');
     setCreatedMission(null);
     setSubmissionError(null);
     setSystemState(MISSION_STATES.IDLE);
+    setExecutionEvents([]);
+    setEvidenceMap(INITIAL_EVIDENCE_MAP);
+    setIsSimulating(false);
+    setActiveAgentId(null);
+    setActiveSecondaryAgentId(null);
   };
 
   // System Telemetry Metrics (Derived from systemState, Task 5)
@@ -476,16 +523,48 @@ export default function App() {
                 animate="animate"
                 className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"
               >
-                {agentModules.map((agent) => (
-                  <AgentModuleCard
-                    key={agent.id}
-                    agent={agent}
-                    isActive={currentConfig.activeAgentId === agent.id}
-                    isSecondary={currentConfig.secondaryAgentId === agent.id}
-                    activeStateLabel={currentConfig.activeAgentId === agent.id ? currentConfig.description : ''}
-                  />
-                ))}
+                {agentModules.map((agent) => {
+                  const isAgentActive = activeAgentId
+                    ? activeAgentId === agent.id
+                    : currentConfig.activeAgentId === agent.id;
+                  const isAgentSecondary = activeSecondaryAgentId
+                    ? activeSecondaryAgentId === agent.id
+                    : currentConfig.secondaryAgentId === agent.id;
+
+                  return (
+                    <AgentModuleCard
+                      key={agent.id}
+                      agent={agent}
+                      isActive={isAgentActive}
+                      isSecondary={isAgentSecondary}
+                      activeStateLabel={isAgentActive ? currentConfig.description : ''}
+                    />
+                  );
+                })}
               </motion.div>
+            </div>
+
+            {/* ============================================================ */}
+            {/* 6. REAL-TIME EXECUTION FEED & EVIDENCE STREAM FOUNDATION     */}
+            {/* ============================================================ */}
+            <div className="w-full">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                {/* Left Column: Mission Execution Feed (7 cols) */}
+                <div className="lg:col-span-7">
+                  <ExecutionFeed
+                    events={executionEvents}
+                    isSimulating={isSimulating}
+                    isComplete={systemState === MISSION_STATES.COMPLETE}
+                  />
+                </div>
+
+                {/* Right Column: Evidence Stream (5 cols) */}
+                <div className="lg:col-span-5">
+                  <EvidenceStream
+                    evidenceMap={evidenceMap}
+                  />
+                </div>
+              </div>
             </div>
 
             {/* ============================================================ */}
