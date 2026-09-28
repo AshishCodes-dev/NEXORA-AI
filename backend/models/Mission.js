@@ -12,10 +12,11 @@ const missionSchema = new mongoose.Schema(
       required: true,
       default: 'queued',
     },
-    // Designed to support future user ownership (Firebase Auth integration)
     userId: {
-      type: String,
-      default: null,
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true,
+      index: true,
     },
   },
   {
