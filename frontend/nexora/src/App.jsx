@@ -17,12 +17,28 @@ import { MISSION_STATES, STATE_CONFIG, STATE_ORDER } from './constants/missionSt
 import { staggerContainer, staggerItem, fadeIn } from './motion/variants';
 import { springs } from './motion/transitions';
 import { RouterProvider, useRouter } from './router/RouterContext';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import LoginPage from './pages/LoginPage';
 import SignupPage from './pages/SignupPage';
 
 function Dashboard() {
+  const { isAuthenticated } = useAuth();
+  const { navigate } = useRouter();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [missionDirective, setMissionDirective] = useState('');
+  const [missionDirective, setMissionDirective] = useState(() => {
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        const pending = window.sessionStorage.getItem('nexora_pending_directive');
+        if (pending) {
+          window.sessionStorage.removeItem('nexora_pending_directive');
+          return pending;
+        }
+      }
+    } catch {
+      // Ignore storage exception
+    }
+    return '';
+  });
 
   // Autonomous System State Model (Task 1 & Task 4)
   const [systemState, setSystemState] = useState(MISSION_STATES.IDLE);
@@ -116,6 +132,21 @@ function Dashboard() {
       return;
     }
 
+    // Step 6B Auth Gate: Block unauthenticated operators from dispatching missions
+    if (!isAuthenticated) {
+      setSubmissionError('AUTHENTICATION_REQUIRED: Operator identity unverified. Directives require active authentication.');
+      setSubmissionState('error');
+      try {
+        if (typeof window !== 'undefined' && window.sessionStorage) {
+          window.sessionStorage.setItem('nexora_pending_directive', trimmed);
+        }
+      } catch {
+        // Ignore storage exception
+      }
+      navigate('/login');
+      return;
+    }
+
     setSubmissionState('processing');
     setSubmissionError(null);
     setSystemState(MISSION_STATES.PLANNING);
@@ -125,7 +156,9 @@ function Dashboard() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Accept': 'application/json',
         },
+        credentials: 'include',
         body: JSON.stringify({ objective: trimmed }),
       });
 
@@ -137,7 +170,13 @@ function Dashboard() {
       }
 
       if (!response.ok || !data || !data.success || !data.mission || typeof data.mission !== 'object' || !data.mission.id) {
-        throw new Error(data?.error || `Server responded with status ${response.status}`);
+        const message =
+          data?.message ||
+          data?.error ||
+          (response.status === 401
+            ? 'Authentication required. Please log in.'
+            : `Server responded with status ${response.status}`);
+        throw new Error(message);
       }
 
       setCreatedMission(data.mission);
@@ -621,7 +660,9 @@ function MainRouter() {
 export default function App() {
   return (
     <RouterProvider>
-      <MainRouter />
+      <AuthProvider>
+        <MainRouter />
+      </AuthProvider>
     </RouterProvider>
   );
 }

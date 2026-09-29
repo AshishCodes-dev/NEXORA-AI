@@ -7,7 +7,8 @@ import AuthInput from '../components/auth/AuthInput';
 import AuthError from '../components/auth/AuthError';
 import GoogleAuthButton from '../components/auth/GoogleAuthButton';
 import { springs } from '../motion/transitions';
-import { Link } from '../router/RouterContext';
+import { Link, useRouter } from '../router/RouterContext';
+import { useAuth } from '../context/AuthContext';
 
 /**
  * SignupPage
@@ -17,6 +18,8 @@ import { Link } from '../router/RouterContext';
  */
 export default function SignupPage() {
   const prefersReducedMotion = useReducedMotion();
+  const { signup } = useAuth();
+  const { navigate } = useRouter();
 
   // Form State
   const [name, setName] = useState('');
@@ -118,13 +121,24 @@ export default function SignupPage() {
     // Set loading state
     setUiState('loading');
 
-    // NOTE: This step establishes the UI Foundation.
-    // The next phase will link directly to POST /api/auth/signup.
-    // Here we simulate the dispatch state transitions safely with no fake database inserts.
-    setTimeout(() => {
-      setUiState('idle');
-      setFormError('GATEWAY_READY: Operator account creation UI foundation primed. Direct API connection is scheduled for Step 6B.');
-    }, 1200);
+    try {
+      await signup(name.trim(), email.trim(), password);
+      setUiState('success');
+      try {
+        if (typeof window !== 'undefined' && window.sessionStorage) {
+          window.sessionStorage.setItem(
+            'nexora_signup_success',
+            'Operator credentials registered successfully. Authenticate with your new credentials to establish session.'
+          );
+        }
+      } catch {
+        // Ignore storage exception
+      }
+      navigate('/login');
+    } catch (err) {
+      setFormError(err.message || 'Registration failed. Please try again.');
+      setUiState('error');
+    }
   };
 
   return (
@@ -137,7 +151,7 @@ export default function SignupPage() {
           subtitle="Register credentials to deploy autonomous AI agents and manage directives."
         />
 
-        {/* Google OAuth (UI Only at Step 6A) */}
+        {/* Google OAuth (UI Only at Step 6A/6B) */}
         <div className="mb-5">
           <GoogleAuthButton
             disabled={uiState === 'loading'}
@@ -160,11 +174,7 @@ export default function SignupPage() {
           <div className="mb-5">
             <AuthError
               error={formError}
-              title={
-                formError.startsWith('GATEWAY_READY')
-                  ? 'SYSTEM NOTICE // STEP 6A FOUNDATION'
-                  : 'ERROR // REGISTRATION_FAILED'
-              }
+              title="ERROR // REGISTRATION_FAILED"
             />
           </div>
         )}

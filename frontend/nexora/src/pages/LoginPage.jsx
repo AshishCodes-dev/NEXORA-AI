@@ -7,7 +7,8 @@ import AuthInput from '../components/auth/AuthInput';
 import AuthError from '../components/auth/AuthError';
 import GoogleAuthButton from '../components/auth/GoogleAuthButton';
 import { springs } from '../motion/transitions';
-import { Link } from '../router/RouterContext';
+import { Link, useRouter } from '../router/RouterContext';
+import { useAuth } from '../context/AuthContext';
 
 /**
  * LoginPage
@@ -17,6 +18,8 @@ import { Link } from '../router/RouterContext';
  */
 export default function LoginPage() {
   const prefersReducedMotion = useReducedMotion();
+  const { login } = useAuth();
+  const { navigate } = useRouter();
 
   // Form State
   const [email, setEmail] = useState('');
@@ -28,6 +31,22 @@ export default function LoginPage() {
   // Operational UX State: 'idle' | 'loading' | 'error' | 'success'
   const [uiState, setUiState] = useState('idle');
   const [formError, setFormError] = useState(null);
+
+  // Transient registration success notice
+  const [successNotice] = useState(() => {
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        const msg = window.sessionStorage.getItem('nexora_signup_success');
+        if (msg) {
+          window.sessionStorage.removeItem('nexora_signup_success');
+          return msg;
+        }
+      }
+    } catch {
+      // Ignore storage exception
+    }
+    return null;
+  });
 
   // Visual-only forgot password notice state
   const [forgotNotice, setForgotNotice] = useState(false);
@@ -86,14 +105,14 @@ export default function LoginPage() {
     // Set loading state
     setUiState('loading');
 
-    // NOTE: This step establishes the UI Foundation.
-    // The next phase will link directly to POST /api/auth/login.
-    // Here we simulate the dispatch state transitions safely with no fake JWT generation.
-    setTimeout(() => {
-      // In Step 6A foundation, verify loading state and feedback without fabricating credentials
-      setUiState('idle');
-      setFormError('GATEWAY_READY: Authentication UI foundation primed. Direct API connection is scheduled for Step 6B.');
-    }, 1200);
+    try {
+      await login(email.trim(), password);
+      setUiState('success');
+      navigate('/');
+    } catch (err) {
+      setFormError(err.message || 'Authentication failed. Please verify credentials.');
+      setUiState('error');
+    }
   };
 
   return (
@@ -106,7 +125,7 @@ export default function LoginPage() {
           subtitle="Authenticate operator identity to open autonomous mission channels."
         />
 
-        {/* Google OAuth (UI Only at Step 6A) */}
+        {/* Google OAuth (UI Only at Step 6A/6B) */}
         <div className="mb-5">
           <GoogleAuthButton
             disabled={uiState === 'loading'}
@@ -124,16 +143,25 @@ export default function LoginPage() {
           </span>
         </div>
 
+        {/* Registration Success Banner */}
+        {successNotice && !formError && (
+          <div className="mb-5 p-3 rounded-lg bg-[rgba(57,255,136,0.08)] border border-[rgba(57,255,136,0.30)] flex items-start gap-2.5">
+            <span className="h-1.5 w-1.5 rounded-full bg-[#39FF88] shadow-[0_0_6px_#39FF88] mt-1 shrink-0" />
+            <div className="flex-1 text-[11px] font-mono text-[#A7F3D0] leading-relaxed">
+              <span className="font-bold text-[#39FF88] uppercase block text-[10px] tracking-wider mb-0.5">
+                IDENTITY REGISTERED // ACCESS GRANTED
+              </span>
+              {successNotice}
+            </div>
+          </div>
+        )}
+
         {/* Form Error Banner */}
         {formError && (
           <div className="mb-5">
             <AuthError
               error={formError}
-              title={
-                formError.startsWith('GATEWAY_READY')
-                  ? 'SYSTEM NOTICE // STEP 6A FOUNDATION'
-                  : 'ERROR // VALIDATION_FAILED'
-              }
+              title="ERROR // AUTHENTICATION_FAILED"
             />
           </div>
         )}
