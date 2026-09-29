@@ -1,4 +1,5 @@
 import { motion } from 'motion/react';
+import { Link } from '../router/RouterContext';
 
 export default function Sidebar({ isOpen, onClose }) {
   const navItems = [
@@ -154,6 +155,20 @@ export default function Sidebar({ isOpen, onClose }) {
               ONLINE
             </span>
           </div>
+
+          {/* Operator Auth Link */}
+          <Link
+            to="/login"
+            className="w-full flex items-center justify-between px-3.5 py-2 rounded-lg text-xs font-mono text-[#756B7D] hover:text-[#F5F1FA] hover:bg-[#050508] border border-transparent hover:border-[rgba(168,85,247,0.08)] transition-colors duration-200 cursor-pointer mb-1.5"
+          >
+            <div className="flex items-center gap-2.5">
+              <svg className="w-4 h-4 text-[#A855F7]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.75">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+              </svg>
+              <span>OPERATOR AUTH</span>
+            </div>
+            <span className="text-[9px] font-mono text-[#C084FC]">LOGIN</span>
+          </Link>
 
           <motion.button
             type="button"

@@ -16,8 +16,11 @@ import { INITIAL_EVIDENCE_MAP } from './constants/executionEvents';
 import { MISSION_STATES, STATE_CONFIG, STATE_ORDER } from './constants/missionStates';
 import { staggerContainer, staggerItem, fadeIn } from './motion/variants';
 import { springs } from './motion/transitions';
+import { RouterProvider, useRouter } from './router/RouterContext';
+import LoginPage from './pages/LoginPage';
+import SignupPage from './pages/SignupPage';
 
-export default function App() {
+function Dashboard() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [missionDirective, setMissionDirective] = useState('');
 
@@ -592,3 +595,34 @@ export default function App() {
     </MotionConfig>
   );
 }
+
+/**
+ * MainRouter
+ * Resolves current client path to designated NEXORA view:
+ * - /login -> LoginPage
+ * - /signup -> SignupPage
+ * - default -> Autonomous Mission Control Dashboard
+ */
+function MainRouter() {
+  const { currentPath } = useRouter();
+  const normalized = (currentPath || '/').toLowerCase().replace(/\/+$/, '') || '/';
+
+  if (normalized === '/login') {
+    return <LoginPage />;
+  }
+
+  if (normalized === '/signup') {
+    return <SignupPage />;
+  }
+
+  return <Dashboard />;
+}
+
+export default function App() {
+  return (
+    <RouterProvider>
+      <MainRouter />
+    </RouterProvider>
+  );
+}
+
