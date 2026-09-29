@@ -1,7 +1,7 @@
 const express = require('express');
 const Mission = require('../models/Mission');
 const authMiddleware = require('../middleware/authMiddleware');
-const { createMissionExecutionPlan } = require('../orchestrator/missionOrchestrator');
+const { createMissionExecutionPlan, executeMission } = require('../orchestrator/missionOrchestrator');
 
 const router = express.Router();
 
@@ -78,10 +78,18 @@ router.post('/', async (req, res) => {
       });
     }
 
-    return res.status(201).json({
+    // Return response promptly without blocking for asynchronous task execution
+    res.status(201).json({
       success: true,
       mission: formatMission(mission),
       tasks: (executionPlan.tasks || []).map(formatTask)
+    });
+
+    // Trigger mission execution asynchronously (safe background dispatch)
+    setImmediate(() => {
+      executeMission(mission._id).catch((execErr) => {
+        console.error(`[ASYNC MISSION EXECUTION ERROR] Mission ${mission._id}:`, execErr.message);
+      });
     });
   } catch (error) {
     console.error('[MISSIONS ROUTE ERROR]', error.message);
