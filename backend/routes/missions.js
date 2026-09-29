@@ -1,6 +1,7 @@
 const express = require('express');
 const Mission = require('../models/Mission');
 const authMiddleware = require('../middleware/authMiddleware');
+const { createMissionExecutionPlan } = require('../orchestrator/missionOrchestrator');
 
 const router = express.Router();
 
@@ -19,8 +20,20 @@ const formatMission = (doc) => ({
 });
 
 /**
+ * Helper to format MissionTask document cleanly
+ */
+const formatTask = (doc) => ({
+  id: doc._id.toString(),
+  title: doc.title,
+  description: doc.description,
+  status: doc.status,
+  order: doc.order
+});
+
+/**
  * POST /api/missions
- * Creates and persists a new mission belonging to the authenticated user
+ * Creates and persists a new mission belonging to the authenticated user,
+ * then generates the deterministic task decomposition plan.
  */
 router.post('/', async (req, res) => {
   const { objective } = req.body || {};
@@ -48,13 +61,27 @@ router.post('/', async (req, res) => {
     // Sourced exclusively from req.user.id (req.body.userId is completely ignored)
     const mission = await Mission.create({
       objective: trimmedObjective,
-      status: 'queued',
+      status: 'planning',
       userId: req.user.id
     });
 
+    let executionPlan;
+    try {
+      executionPlan = await createMissionExecutionPlan(mission);
+    } catch (orchestrationError) {
+      console.error('[MISSION ORCHESTRATION ERROR]', orchestrationError.message);
+      // Clean up orphaned mission to avoid partial/broken state
+      await Mission.findByIdAndDelete(mission._id).catch(() => {});
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to generate mission execution plan.'
+      });
+    }
+
     return res.status(201).json({
       success: true,
-      mission: formatMission(mission)
+      mission: formatMission(mission),
+      tasks: (executionPlan.tasks || []).map(formatTask)
     });
   } catch (error) {
     console.error('[MISSIONS ROUTE ERROR]', error.message);
