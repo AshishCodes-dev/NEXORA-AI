@@ -1,16 +1,17 @@
 const mongoose = require('mongoose');
 const MissionTask = require('../models/MissionTask');
+const { executeTaskWithAgent } = require('../agents/agentExecutionGateway');
 
 /**
- * Deterministic Task Work Placeholder
+ * Task Work Execution
+ * Dispatches the running MissionTask to the Agent Execution Gateway.
  * 
- * NOTE: This is an internal deterministic execution function.
- * It does NOT call external AI providers, LLMs, search engines, or perform real web research.
- * It simulates deterministic work lifecycle progression.
+ * NOTE: The agents invoked currently return structured simulated execution stubs.
+ * Real external research, scraping, and browser automation are deferred to later phases.
  * 
  * @param {import('mongoose').Document} task - The running MissionTask document
  * @param {object} [options={}] - Execution options (e.g. test hooks)
- * @returns {Promise<void>}
+ * @returns {Promise<object>} The normalized agent execution result
  */
 async function executeTaskWork(task, options = {}) {
   // Test hook: allow controlled deterministic failure injection for testing
@@ -23,6 +24,10 @@ async function executeTaskWork(task, options = {}) {
   if (delayMs > 0) {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
+
+  // Dispatch task to specialized agent through the Agent Execution Gateway
+  const agentResult = await executeTaskWithAgent(task, { options });
+  return agentResult;
 }
 
 /**
