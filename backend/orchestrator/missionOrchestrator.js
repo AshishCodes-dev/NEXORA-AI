@@ -1,35 +1,36 @@
 const mongoose = require('mongoose');
 const Mission = require('../models/Mission');
 const MissionTask = require('../models/MissionTask');
-const { planMission } = require('./missionPlanner');
+const { generatePlan, planMission } = require('./missionPlanner');
 const { createMissionTasks } = require('./taskManager');
 const { executeMissionTask } = require('./taskExecutor');
 
 /**
- * Creates the deterministic execution plan for a newly submitted mission.
- * 
- * NOTE: This module only prepares the mission execution plan.
- * It does not execute tasks, call AI/LLMs, use timers, queues, or external services.
+ * Creates the execution plan for a newly submitted mission.
+ * Orchestrates plan generation through missionPlanner (AI with safe deterministic fallback)
+ * and persists the tasks in MongoDB.
  * 
  * @param {object} mission - The persisted Mission document
- * @returns {Promise<{mission: object, tasks: Array<object>}>}
+ * @param {object} [options={}] - Optional planning options
+ * @returns {Promise<{mission: object, tasks: Array<object>, planSource: string}>}
  */
-async function createMissionExecutionPlan(mission) {
+async function createMissionExecutionPlan(mission, options = {}) {
   // 1. Validate mission
   if (!mission || !mission._id || typeof mission.objective !== 'string') {
     throw new Error('Valid mission document with _id and objective is required');
   }
 
-  // 2. Deterministic decomposition
-  const taskDefinitions = planMission(mission.objective);
+  // 2. Generate plan via missionPlanner (Gemini with deterministic fallback)
+  const planResult = await generatePlan(mission.objective, options);
 
   // 3. Persist mission tasks
-  const tasks = await createMissionTasks(mission._id, taskDefinitions);
+  const tasks = await createMissionTasks(mission._id, planResult.tasks);
 
   // 4. Return execution plan
   return {
     mission,
     tasks,
+    planSource: planResult.source,
   };
 }
 
