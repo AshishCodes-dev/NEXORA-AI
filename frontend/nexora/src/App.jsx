@@ -12,6 +12,7 @@ import MissionComposer from './components/MissionComposer';
 import ExecutionFeed from './components/ExecutionFeed';
 import EvidenceStream from './components/EvidenceStream';
 import demoExecutionEngine from './services/demoExecutionEngine';
+import { getMissionResult, MissionResultError } from './services/missionResultService';
 import { INITIAL_EVIDENCE_MAP } from './constants/executionEvents';
 import { MISSION_STATES, STATE_CONFIG, STATE_ORDER } from './constants/missionStates';
 import { staggerContainer, staggerItem, fadeIn } from './motion/variants';
@@ -51,6 +52,8 @@ function Dashboard() {
     return () => {
       demoExecutionEngine.stop();
       if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
+      if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
+      if (abortControllerRef.current) abortControllerRef.current.abort();
     };
   }, []);
 
@@ -81,6 +84,159 @@ function Dashboard() {
   const [submissionState, setSubmissionState] = useState('idle'); // 'idle' | 'processing' | 'success' | 'error'
   const [submissionError, setSubmissionError] = useState(null);
   const [createdMission, setCreatedMission] = useState(null);
+
+  // Step 8B.1: Authoritative Backend Mission Result State
+  const [currentMissionId, setCurrentMissionId] = useState(null);
+  const [missionResult, setMissionResult] = useState(null);
+  const [resultLoading, setResultLoading] = useState(false);
+  const [resultError, setResultError] = useState(null);
+  const [isPolling, setIsPolling] = useState(false);
+
+  const pollingTimerRef = useRef(null);
+  const isFetchingRef = useRef(false);
+  const activeMissionIdRef = useRef(null);
+  const abortControllerRef = useRef(null);
+
+  // Synchronize active mission ID ref
+  useEffect(() => {
+    activeMissionIdRef.current = currentMissionId;
+  }, [currentMissionId]);
+
+  // Auth cleanup: stop polling and clear mission state on logout
+  useEffect(() => {
+    if (!isAuthenticated) {
+      if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+      isFetchingRef.current = false;
+      activeMissionIdRef.current = null;
+      setIsPolling(false);
+      setResultLoading(false);
+      setCurrentMissionId(null);
+      setMissionResult(null);
+      setResultError(null);
+      demoExecutionEngine.stop();
+    }
+  }, [isAuthenticated]);
+
+  // Authoritative Mission Result Polling Effect (Step 8B.1)
+  useEffect(() => {
+    if (!currentMissionId || !isPolling || !isAuthenticated) {
+      return;
+    }
+
+    let isMounted = true;
+
+    const poll = async () => {
+      // Guard against overlapping poll requests
+      if (isFetchingRef.current) return;
+      if (!isMounted || activeMissionIdRef.current !== currentMissionId) return;
+
+      isFetchingRef.current = true;
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
+      try {
+        const result = await getMissionResult(currentMissionId, {
+          signal: controller.signal,
+        });
+
+        // Guard against race condition if mission ID changed while in flight
+        if (!isMounted || activeMissionIdRef.current !== currentMissionId) {
+          return;
+        }
+
+        setMissionResult(result);
+        setResultError(null);
+        setResultLoading(false);
+
+        // Update active agent based on real running tasks
+        if (result?.tasks && Array.isArray(result.tasks)) {
+          const runningTask = result.tasks.find(t => t.status === 'running');
+          if (runningTask) {
+            const agentKey = (runningTask.agentId || '').toLowerCase();
+            const textToMatch = `${runningTask.title || ''} ${runningTask.description || ''}`.toLowerCase();
+            let matchedState = null;
+
+            if (agentKey === 'qa' || /\b(qa|test)\b/.test(textToMatch)) {
+              matchedState = MISSION_STATES.QA;
+            } else if (agentKey === 'builder' || /\b(builder|output|artifact|build|assemble)\b/.test(textToMatch)) {
+              matchedState = MISSION_STATES.BUILDING;
+            } else if (agentKey === 'critic' || /\b(critic|audit|verify|validation)\b/.test(textToMatch)) {
+              matchedState = MISSION_STATES.VERIFYING;
+            } else if (agentKey === 'research' || /\b(research|gather|collect|search)\b/.test(textToMatch)) {
+              matchedState = MISSION_STATES.RESEARCHING;
+            } else if (agentKey === 'analyst' || /\b(analyst|analyze|analysis)\b/.test(textToMatch)) {
+              matchedState = MISSION_STATES.ANALYZING;
+            }
+
+            if (matchedState) {
+              setSystemState(matchedState);
+            }
+          }
+        }
+
+        const missionStatus = result?.mission?.status;
+        const resultStatus = result?.resultStatus;
+        const verificationStatus = result?.status;
+        const isReady = resultStatus?.ready === true;
+        const isTerminal =
+          missionStatus === 'completed' ||
+          missionStatus === 'failed' ||
+          isReady ||
+          ['verified', 'needs_revision', 'failed'].includes(verificationStatus);
+
+        if (isTerminal) {
+          setIsPolling(false);
+          demoExecutionEngine.stop();
+          if (missionStatus === 'completed' || isReady || ['verified', 'needs_revision'].includes(verificationStatus)) {
+            setSystemState(MISSION_STATES.COMPLETE);
+          } else if (missionStatus === 'failed' || verificationStatus === 'failed') {
+            setSystemState(MISSION_STATES.IDLE);
+          }
+          return;
+        }
+
+        // Schedule next poll interval (2.5s)
+        if (isMounted && activeMissionIdRef.current === currentMissionId) {
+          pollingTimerRef.current = setTimeout(poll, 2500);
+        }
+      } catch (err) {
+        if (!isMounted || activeMissionIdRef.current !== currentMissionId) {
+          return;
+        }
+
+        if (err.name === 'AbortError') {
+          return;
+        }
+
+        const errorMessage = err.message || 'Failed to fetch mission result';
+        setResultError(errorMessage);
+        setResultLoading(false);
+
+        // Stop polling on terminal auth or not-found errors
+        if (err.statusCode === 401 || err.statusCode === 404) {
+          setIsPolling(false);
+          return;
+        }
+
+        // For transient errors, retry after interval
+        if (isMounted && activeMissionIdRef.current === currentMissionId) {
+          pollingTimerRef.current = setTimeout(poll, 2500);
+        }
+      } finally {
+        isFetchingRef.current = false;
+      }
+    };
+
+    poll();
+
+    return () => {
+      isMounted = false;
+      if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+      isFetchingRef.current = false;
+    };
+  }, [currentMissionId, isPolling, isAuthenticated]);
 
   // Execution Telemetry & Evidence Streams (Step 5)
   const [executionEvents, setExecutionEvents] = useState([]);
@@ -180,6 +336,12 @@ function Dashboard() {
       }
 
       setCreatedMission(data.mission);
+      setCurrentMissionId(data.mission.id);
+      activeMissionIdRef.current = data.mission.id;
+      setMissionResult(null);
+      setResultError(null);
+      setResultLoading(true);
+      setIsPolling(true);
       setSubmissionState('success');
       setIsSimulating(true);
 
@@ -224,6 +386,8 @@ function Dashboard() {
       setSubmissionState('error');
       setSystemState(MISSION_STATES.IDLE);
       setIsSimulating(false);
+      setIsPolling(false);
+      setResultLoading(false);
       demoExecutionEngine.stop();
     }
   };
@@ -232,6 +396,17 @@ function Dashboard() {
   const handleResetMission = () => {
     demoExecutionEngine.stop();
     if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
+    if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    isFetchingRef.current = false;
+    activeMissionIdRef.current = null;
+
+    setCurrentMissionId(null);
+    setMissionResult(null);
+    setResultLoading(false);
+    setResultError(null);
+    setIsPolling(false);
+
     setSubmissionState('idle');
     setMissionDirective('');
     setCreatedMission(null);
@@ -537,6 +712,9 @@ function Dashboard() {
                 createdMission={createdMission}
                 systemState={systemState}
                 currentConfig={currentConfig}
+                missionResult={missionResult}
+                resultLoading={resultLoading}
+                resultError={resultError}
                 onSubmit={handleRunMission}
                 onReset={handleResetMission}
               />

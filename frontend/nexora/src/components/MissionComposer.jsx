@@ -42,6 +42,9 @@ export default function MissionComposer({
   createdMission,
   systemState,
   currentConfig,
+  missionResult = null,
+  resultLoading = false,
+  resultError = null,
   onSubmit,
   onReset,
 }) {
@@ -134,9 +137,27 @@ export default function MissionComposer({
                     <span className="text-[9px] font-mono uppercase tracking-wider text-[#554C5C] block mb-0.5">
                       Status
                     </span>
-                    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase bg-[rgba(57,255,136,0.1)] border border-[rgba(57,255,136,0.25)] text-[#39FF88]">
-                      <span className="h-1.5 w-1.5 rounded-full bg-[#39FF88] shadow-[0_0_4px_#39FF88]" />
-                      {createdMission?.status ? createdMission.status.toUpperCase() : 'QUEUED'}
+                    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${
+                      missionResult?.resultStatus?.ready && missionResult.resultStatus.verification === 'verified'
+                        ? 'bg-[rgba(57,255,136,0.1)] border border-[rgba(57,255,136,0.25)] text-[#39FF88]'
+                        : missionResult?.resultStatus?.ready && missionResult.resultStatus.verification === 'needs_revision'
+                        ? 'bg-[rgba(245,158,11,0.1)] border border-[rgba(245,158,11,0.25)] text-[#F59E0B]'
+                        : missionResult?.mission?.status === 'failed' || (missionResult?.resultStatus?.ready && missionResult.resultStatus.verification === 'failed')
+                        ? 'bg-[rgba(239,68,68,0.1)] border border-[rgba(239,68,68,0.25)] text-[#EF4444]'
+                        : 'bg-[rgba(192,132,252,0.1)] border border-[rgba(192,132,252,0.25)] text-[#C084FC]'
+                    }`}>
+                      <span className={`h-1.5 w-1.5 rounded-full ${
+                        missionResult?.resultStatus?.ready && missionResult.resultStatus.verification === 'verified'
+                          ? 'bg-[#39FF88] shadow-[0_0_4px_#39FF88]'
+                          : missionResult?.resultStatus?.ready && missionResult.resultStatus.verification === 'needs_revision'
+                          ? 'bg-[#F59E0B]'
+                          : missionResult?.mission?.status === 'failed' || (missionResult?.resultStatus?.ready && missionResult.resultStatus.verification === 'failed')
+                          ? 'bg-[#EF4444]'
+                          : 'bg-[#C084FC] animate-pulse'
+                      }`} />
+                      {missionResult?.resultStatus?.ready
+                        ? missionResult.resultStatus.verification.toUpperCase()
+                        : (missionResult?.mission?.status || createdMission?.status || 'QUEUED').toUpperCase()}
                     </span>
                   </div>
                   <div>
@@ -151,6 +172,94 @@ export default function MissionComposer({
                   </div>
                 </div>
               </div>
+
+              {/* Authoritative Backend Result Status & Telemetry (Step 8B.1) */}
+              {resultLoading && !missionResult && (
+                <div className="rounded-lg bg-[#07050E] border border-[rgba(168,85,247,0.2)] p-3 mb-4 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="h-2 w-2 rounded-full bg-[#C084FC] animate-pulse" />
+                    <span className="text-[11px] font-mono text-[#E9D5FF]">
+                      POLLING BACKEND RESULT // OPERATING PIPELINE
+                    </span>
+                  </div>
+                  <span className="text-[9px] font-mono text-[#756B7D]">SYNC ACTIVE (2.5s)</span>
+                </div>
+              )}
+
+              {resultError && (
+                <div className="rounded-lg bg-[rgba(239,68,68,0.08)] border border-[rgba(239,68,68,0.3)] p-3 mb-4">
+                  <div className="flex items-center gap-2 text-[#EF4444] text-xs font-mono font-bold mb-1">
+                    <span>GATEWAY NOTICE:</span>
+                    <span>{resultError}</span>
+                  </div>
+                  <p className="text-[10px] font-mono text-[#F87171]">
+                    Authoritative result sync encountered an issue. Polling will resume automatically if transient.
+                  </p>
+                </div>
+              )}
+
+              {missionResult && (
+                <div className="rounded-lg bg-[#050508] border border-[rgba(168,85,247,0.18)] p-3.5 mb-4 shadow-[0_4px_20px_rgba(0,0,0,0.5)]">
+                  <div className="flex items-center justify-between pb-2 mb-2 border-b border-[rgba(168,85,247,0.1)] text-[9px] font-mono text-[#756B7D] uppercase tracking-wider">
+                    <span>AUTHORITATIVE BACKEND RESULT</span>
+                    <span className="text-[#39FF88] flex items-center gap-1">
+                      <span className="h-1 w-1 rounded-full bg-[#39FF88]" />
+                      {missionResult.resultStatus?.ready ? 'RESULT READY' : 'PIPELINE IN PROGRESS'}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-3">
+                    <div className="p-2 rounded bg-[#090710] border border-[rgba(168,85,247,0.08)]">
+                      <span className="text-[9px] font-mono text-[#756B7D] block">TASKS</span>
+                      <span className="text-xs font-mono font-bold text-[#E9D5FF]">
+                        {missionResult.tasks?.filter(t => t.status === 'completed').length || 0} / {missionResult.tasks?.length || 0}
+                      </span>
+                    </div>
+                    <div className="p-2 rounded bg-[#090710] border border-[rgba(168,85,247,0.08)]">
+                      <span className="text-[9px] font-mono text-[#756B7D] block">EVIDENCE</span>
+                      <span className="text-xs font-mono font-bold text-[#38BDF8]">
+                        {missionResult.evidence?.length || 0} verified
+                      </span>
+                    </div>
+                    <div className="p-2 rounded bg-[#090710] border border-[rgba(168,85,247,0.08)]">
+                      <span className="text-[9px] font-mono text-[#756B7D] block">ARTIFACT</span>
+                      <span className="text-xs font-mono font-bold text-[#C084FC] truncate block">
+                        {missionResult.artifact ? (missionResult.artifact.artifactType || 'Report').toUpperCase() : 'PENDING'}
+                      </span>
+                    </div>
+                    <div className="p-2 rounded bg-[#090710] border border-[rgba(168,85,247,0.08)]">
+                      <span className="text-[9px] font-mono text-[#756B7D] block">QA VERDICT</span>
+                      <span className={`text-xs font-mono font-bold uppercase ${
+                        missionResult.resultStatus?.qaVerdict === 'pass'
+                          ? 'text-[#39FF88]'
+                          : missionResult.resultStatus?.qaVerdict === 'needs_revision'
+                          ? 'text-[#F59E0B]'
+                          : missionResult.resultStatus?.qaVerdict === 'fail'
+                          ? 'text-[#EF4444]'
+                          : 'text-[#756B7D]'
+                      }`}>
+                        {missionResult.resultStatus?.qaVerdict || 'PENDING'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {missionResult.artifact && (
+                    <div className="pt-2 border-t border-[rgba(168,85,247,0.08)]">
+                      <span className="text-[9px] font-mono text-[#756B7D] block mb-0.5 uppercase">
+                        Synthesized Deliverable
+                      </span>
+                      <div className="text-xs font-mono text-[#F5F1FA] font-bold">
+                        {missionResult.artifact.title}
+                      </div>
+                      {missionResult.artifact.executiveSummary && (
+                        <p className="text-[11px] font-mono text-[#B8ADBF] mt-1 line-clamp-2 leading-relaxed">
+                          {missionResult.artifact.executiveSummary}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Objective Display with CLI Prefix */}
               <div className="rounded-lg bg-[#050508] border border-[rgba(168,85,247,0.12)] p-3.5 mb-4">
