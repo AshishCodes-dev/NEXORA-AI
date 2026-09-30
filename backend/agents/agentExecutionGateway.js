@@ -78,6 +78,7 @@ async function executeTaskWithAgent(task, context = {}) {
   const normalizedTask = {
     taskId,
     missionId: task.missionId ? task.missionId.toString() : null,
+    agentId: task.agentId || undefined,
     title: task.title || '',
     description: task.description || '',
     order: task.order || 1,
