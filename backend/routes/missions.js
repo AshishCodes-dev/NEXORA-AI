@@ -2,6 +2,7 @@ const express = require('express');
 const Mission = require('../models/Mission');
 const authMiddleware = require('../middleware/authMiddleware');
 const { createMissionExecutionPlan, executeMission } = require('../orchestrator/missionOrchestrator');
+const { getMissionResult } = require('../services/missionResultService');
 
 const router = express.Router();
 
@@ -119,6 +120,33 @@ router.get('/', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: 'Failed to retrieve persisted missions.'
+    });
+  }
+});
+
+/**
+ * GET /api/missions/:missionId/result
+ * Retrieves the complete aggregated final result of a mission owned by the authenticated user.
+ */
+router.get('/:missionId/result', async (req, res) => {
+  try {
+    const { missionId } = req.params;
+    // req.user.id is guaranteed by authMiddleware; query/body params are strictly ignored
+    const result = await getMissionResult(missionId, req.user.id);
+
+    if (result.notFound) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error('[MISSION RESULT ROUTE ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve mission result'
     });
   }
 });
