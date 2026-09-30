@@ -40,12 +40,12 @@ function routeTaskToAgent(task, context = {}) {
     return 'builder';
   }
 
-  if (/\b(research|gather|collect|information|retrieval|search|investigate|index)\b/.test(textToEvaluate)) {
-    return 'research';
-  }
-
   if (/\b(analyst|analyze|analysis|reasoning|compare|comparison|evaluate|evaluation|break down)\b/.test(textToEvaluate)) {
     return 'analyst';
+  }
+
+  if (/\b(research|gather|collect|information|retrieval|search|investigate|index)\b/.test(textToEvaluate)) {
+    return 'research';
   }
 
   // 3. Fallback based on deterministic plan phase order
