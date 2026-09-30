@@ -53,6 +53,7 @@ function routeTaskToAgent(task, context = {}) {
   if (task.order === 2) return 'research';
   if (task.order === 3) return 'analyst';
   if (task.order === 4) return 'builder';
+  if (task.order === 5) return 'qa';
 
   return 'analyst';
 }
