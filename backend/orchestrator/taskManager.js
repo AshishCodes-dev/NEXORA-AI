@@ -46,6 +46,9 @@ async function createMissionTasks(missionId, taskDefinitions) {
     description: def.description.trim(),
     status: 'pending',
     order: def.order,
+    agentId: def.agentId || null,
+    url: def.url || null,
+    executionMetadata: def.missionObjective ? { missionObjective: def.missionObjective } : null,
   }));
 
   // 5. Persist tasks

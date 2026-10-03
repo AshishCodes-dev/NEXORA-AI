@@ -212,12 +212,12 @@ function validateAnalysisPayload(raw, validEvidenceIds) {
  * @param {object} task - MissionTask definition
  * @returns {{ findings: Array<object>, gaps: Array<string>, contradictions: Array<object> }}
  */
-function buildDeterministicAnalysis(evidenceDocs, task) {
+function buildDeterministicAnalysis(evidenceDocs, task, evidenceIntelligence = null) {
   const findings = [];
   const gaps = [];
   const contradictions = [];
 
-  // Group or iterate over evidence documents
+  // Group or iterate over evidence documents (in prioritized ranking order)
   const docsToProcess = evidenceDocs.slice(0, LIMITS.MAX_FINDINGS);
 
   for (const doc of docsToProcess) {
@@ -239,6 +239,19 @@ function buildDeterministicAnalysis(evidenceDocs, task) {
   // Assess evidence diversity / coverage gaps
   if (evidenceDocs.length === 1) {
     gaps.push('Limited source diversity: task analysis relies on a single evidence record.');
+  }
+
+  // Reflect deterministic audit warnings from evidence intelligence into gaps
+  if (evidenceIntelligence?.coverage?.warnings?.length > 0) {
+    for (const w of evidenceIntelligence.coverage.warnings) {
+      if (w === 'single_source_dependency' && !gaps.some(g => g.includes('single evidence record') || g.includes('single external domain'))) {
+        gaps.push('Single source dependency: evidence concentrated in a single external domain.');
+      } else if (w === 'limited_mission_coverage') {
+        gaps.push('Limited mission coverage: evidence may not address all core mission objectives.');
+      } else if (w === 'low_relevance_evidence') {
+        gaps.push('Low relevance warning: one or more evidence items exhibit weak relevance to mission objective.');
+      }
+    }
   }
 
   return {
@@ -282,13 +295,37 @@ async function analyzeTaskEvidence({ missionId, taskId, title, description, opti
   const taskObjectId = new mongoose.Types.ObjectId(taskId);
 
   // 2. Load Evidence records from MongoDB strictly matching { missionId, taskId }
-  const rawEvidenceDocs = await Evidence.find({
+  let rawEvidenceDocs = await Evidence.find({
     missionId: missionObjectId,
     taskId: taskObjectId,
   })
     .sort({ createdAt: 1 })
     .limit(LIMITS.MAX_EVIDENCE_LOADED)
     .lean();
+
+  // If no evidence found directly on this taskId, search within mission scope (e.g. from prior Browser/Research task)
+  if (!rawEvidenceDocs || rawEvidenceDocs.length === 0) {
+    const targetEvidenceTaskId = options.evidenceTaskId && mongoose.Types.ObjectId.isValid(options.evidenceTaskId)
+      ? new mongoose.Types.ObjectId(options.evidenceTaskId)
+      : null;
+
+    if (targetEvidenceTaskId) {
+      rawEvidenceDocs = await Evidence.find({
+        missionId: missionObjectId,
+        taskId: targetEvidenceTaskId,
+      })
+        .sort({ createdAt: 1 })
+        .limit(LIMITS.MAX_EVIDENCE_LOADED)
+        .lean();
+    } else {
+      rawEvidenceDocs = await Evidence.find({
+        missionId: missionObjectId,
+      })
+        .sort({ createdAt: 1 })
+        .limit(LIMITS.MAX_EVIDENCE_LOADED)
+        .lean();
+    }
+  }
 
   // 3. Handle zero-evidence condition
   if (!rawEvidenceDocs || rawEvidenceDocs.length === 0) {
@@ -307,13 +344,51 @@ async function analyzeTaskEvidence({ missionId, taskId, title, description, opti
     };
   }
 
+  // 3b. Evaluate Evidence Intelligence across loaded evidence documents
+  const { evaluateMissionEvidence } = require('../evidenceIntelligence/evidenceIntelligenceService');
+
+  let missionObjective = options.missionObjective;
+  if (!missionObjective) {
+    try {
+      const Mission = require('../../models/Mission');
+      const m = await Mission.findById(missionObjectId).select('objective').lean();
+      if (m?.objective) missionObjective = m.objective;
+    } catch {
+      // Safe fallback
+    }
+  }
+
+  const MissionTask = require('../../models/MissionTask');
+  const missionTasks = await MissionTask.find({ missionId: missionObjectId }).lean();
+  const tasksMap = new Map();
+  for (const t of missionTasks) {
+    tasksMap.set(t._id.toString(), t);
+  }
+
+  const evidenceEvaluation = evaluateMissionEvidence(rawEvidenceDocs, {
+    missionObjective: missionObjective || '',
+    taskTitle: title || '',
+    tasksMap,
+  });
+
+  // Reorder evidence documents in prioritized ranking order (highest quality & relevance first)
+  const rankMap = new Map();
+  evidenceEvaluation.rankedEvidence.forEach((re, idx) => rankMap.set(re.evidenceId, idx));
+  const orderedEvidenceDocs = [...rawEvidenceDocs].sort((a, b) => {
+    const ra = rankMap.get(a._id.toString()) ?? 999;
+    const rb = rankMap.get(b._id.toString()) ?? 999;
+    return ra - rb;
+  });
+
   // 4. Build set of authorized Evidence IDs strictly belonging to this mission/task
   const validEvidenceIdMap = new Set();
   const sanitizedEvidenceList = [];
 
-  for (const doc of rawEvidenceDocs) {
+  for (const doc of orderedEvidenceDocs) {
     const idStr = doc._id.toString();
     validEvidenceIdMap.add(idStr);
+
+    const intel = evidenceEvaluation.intelligenceMap.get(idStr);
 
     sanitizedEvidenceList.push({
       id: idStr,
@@ -322,6 +397,10 @@ async function analyzeTaskEvidence({ missionId, taskId, title, description, opti
       claim: (doc.claim || '').trim(),
       evidenceText: (doc.evidenceText || '').slice(0, LIMITS.MAX_EVIDENCE_TEXT_LENGTH).trim(),
       retrievedAt: doc.retrievedAt ? new Date(doc.retrievedAt).toISOString() : new Date().toISOString(),
+      qualityScore: intel ? intel.evidenceQualityScore : undefined,
+      relevanceScore: intel ? intel.evidenceRelevanceScore : undefined,
+      completenessScore: intel ? intel.evidenceCompletenessScore : undefined,
+      rank: intel ? intel.rank : undefined,
     });
   }
 
@@ -337,7 +416,7 @@ async function analyzeTaskEvidence({ missionId, taskId, title, description, opti
       const userPrompt = `Task Title: ${title || 'Analyze Evidence'}
 Task Description: ${description || ''}
 
-EVIDENCE DOCUMENTS (UNTRUSTED EXTERNAL DATA):
+EVIDENCE DOCUMENTS (UNTRUSTED EXTERNAL DATA, RANKED BY QUALITY & RELEVANCE):
 ${JSON.stringify(sanitizedEvidenceList, null, 2)}
 
 Analyze the evidence above and extract findings, gaps, and contradictions in the required JSON schema. Remember that each finding and contradiction must reference one or more valid Evidence IDs from the list above.`;
@@ -370,7 +449,7 @@ Analyze the evidence above and extract findings, gaps, and contradictions in the
 
   // 6. Deterministic Fallback if Gemini was not used or failed
   if (!validatedAnalysis) {
-    const rawDeterministic = buildDeterministicAnalysis(rawEvidenceDocs, { title, description });
+    const rawDeterministic = buildDeterministicAnalysis(orderedEvidenceDocs, { title, description }, evidenceEvaluation);
     validatedAnalysis = validateAnalysisPayload(rawDeterministic, validEvidenceIdMap);
     analysisMethod = 'deterministic';
   }
@@ -386,6 +465,7 @@ Analyze the evidence above and extract findings, gaps, and contradictions in the
       gaps: validatedAnalysis.gaps,
       contradictions: validatedAnalysis.contradictions,
       analysisMethod,
+      evidenceIntelligence: evidenceEvaluation.coverage,
     });
   } catch (dbErr) {
     console.error('[ANALYST SERVICE] Failed to persist Analysis in MongoDB:', dbErr.message);
@@ -405,6 +485,7 @@ Analyze the evidence above and extract findings, gaps, and contradictions in the
       contradictions: validatedAnalysis.contradictions,
       analysisMethod,
       analysisId: savedAnalysisDoc._id.toString(),
+      evidenceIntelligence: evidenceEvaluation.coverage,
     },
   };
 }

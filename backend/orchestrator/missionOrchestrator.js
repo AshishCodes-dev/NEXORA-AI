@@ -67,19 +67,58 @@ async function executeMission(missionId, options = {}) {
     return { mission: existing, alreadyRan: true };
   }
 
-  // 3. Load associated tasks ordered by `order`
-  const tasks = await MissionTask.find({ missionId }).sort({ order: 1 });
-  if (!tasks || tasks.length === 0) {
+  // 3. Load associated tasks to verify initial presence
+  const initialTasks = await MissionTask.find({ missionId }).sort({ order: 1 });
+  if (!initialTasks || initialTasks.length === 0) {
     await Mission.findByIdAndUpdate(missionId, { $set: { status: 'failed' } });
     throw new Error(`No tasks found for mission ${missionId}`);
   }
 
-  // 4. Execute tasks strictly sequentially
+  // 4. Execute tasks strictly sequentially (dynamic pending queue)
   const executedTasks = [];
   try {
-    for (const task of tasks) {
-      const executed = await executeMissionTask(task._id, options);
+    while (true) {
+      const nextTask = await MissionTask.findOne({
+        missionId,
+        status: 'pending',
+      }).sort({ order: 1 });
+
+      if (!nextTask) {
+        break;
+      }
+
+      const taskOptions = {
+        ...options,
+        missionObjective: mission.objective,
+      };
+      const executed = await executeMissionTask(nextTask._id, taskOptions);
       executedTasks.push(executed);
+
+      // Dynamic Research -> Browser handoff
+      // If the completed task was a research task and discovered candidates,
+      // create and insert bounded, verified Browser inspection tasks before downstream tasks.
+      const isResearchTask = executed.agentId === 'research' ||
+        /\b(research|gather|information)\b/i.test(executed.title || '');
+
+      if (isResearchTask && options.skipBrowserHandoff !== true) {
+        const candidates = executed._agentResult?.data?.candidates ||
+          executed.executionMetadata?.resultData?.candidates || [];
+
+        if (Array.isArray(candidates) && candidates.length > 0) {
+          const { createBrowserTasksFromResearch } = require('../services/research/browserHandoffService');
+          await createBrowserTasksFromResearch({
+            missionId,
+            researchTaskId: executed._id,
+            candidates,
+            currentTaskOrder: executed.order,
+            options: {
+              ...options,
+              missionObjective: mission.objective,
+              taskTitle: executed.title,
+            },
+          });
+        }
+      }
     }
 
     // 5. Transition mission: running -> completed

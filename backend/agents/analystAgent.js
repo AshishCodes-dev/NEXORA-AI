@@ -39,6 +39,7 @@ async function executeAnalystTask(task, context = {}) {
     taskId,
     title: task.title || '',
     description: task.description || '',
+    missionObjective: task.missionObjective || context.missionObjective || context.options?.missionObjective || null,
     options: context.options || {},
   });
 

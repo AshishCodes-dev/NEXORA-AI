@@ -6,23 +6,102 @@ const { fetchSource } = require('../services/research/sourceFetcher');
 const Evidence = require('../models/Evidence');
 
 /**
- * Builds a clean, focused web search query from a task's title and description.
- * 
- * @param {object} task
- * @returns {string}
+ * Known generic workflow title patterns that indicate a generic workflow phase
+ * rather than a domain-specific research topic.
  */
-function buildSearchQuery(task) {
+const GENERIC_PHASE_TITLE_REGEX = /^(task\s*\d*[:\-]|gather\s+(required\s+|the\s+)?(information|data|sources|references|docs|facts)|collect\s+(required\s+|the\s+)?(information|data|sources)|research[:\-]|investigate[:\-]|analyze[:\-])/i;
+
+/**
+ * Malicious or adversarial prompt-injection patterns that must never influence
+ * search queries or system behavior.
+ */
+const PROMPT_INJECTION_DIRECTIVES_REGEX = /\b(ignore\s+(all\s+)?previous\s+instructions|disregard\s+(all\s+)?prior\s+instructions|reveal\s+(api\s+keys?|passwords?|secrets?|tokens?|system\s+prompt)|drop\s+tables?|delete\s+from|rm\s+-rf|format\s+c:|system\s+prompt|developer\s+mode|jailbreak|execute\s+(code|script|command|shell))\b/gi;
+
+/**
+ * Operational prefixes to clean from raw query strings to leave focused domain keywords.
+ */
+const QUERY_PREFIX_CLEAN_REGEX = /^(please\s+)?(compare\s+(and\s+contrast\s+)?|research\s+(and\s+analyze\s+)?|investigate\s+|analyze\s+|study\s+|examine\s+|explore\s+|find\s+(out\s+)?(about\s+)?|search\s+(for\s+)?|look\s+up\s+|gather\s+information\s+(about|on)\s+|collect\s+information\s+(about|on)\s+|provide\s+information\s+(about|on)\s+|tell\s+me\s+about\s+|what\s+is\s+|how\s+does\s+|explain\s+)(the\s+)?/i;
+
+/**
+ * Common conversational or metadata suffixes to remove from search queries.
+ */
+const QUERY_SUFFIX_CLEAN_REGEX = /\s+(and\s+(prepare|summarize|generate|write|report|create|provide|deliver)\s+.*|using\s+.*|with\s+.*|via\s+.*|for\s+(my\s+|the\s+)?(project|application|app|team)|in\s+detail|comprehensively|thoroughly|step\s+by\s+step).*$/i;
+
+/**
+ * Builds a mission-aware, clean, focused web search query.
+ * 
+ * Prioritizes the mission's operational objective when task titles are generic
+ * workflow placeholders (e.g. "Gather required information").
+ * Strictly bounds query length, removes conversational filler, and neutralizes
+ * prompt injection patterns.
+ * 
+ * @param {object} [task={}] - MissionTask definition
+ * @param {object} [context={}] - Gateway execution context containing mission metadata
+ * @returns {string} Clean, bounded, domain-focused search query
+ */
+function buildSearchQuery(task = {}, context = {}) {
+  // 1. Resolve raw contextual strings
+  const missionObjective = (
+    context.missionObjective ||
+    context.options?.missionObjective ||
+    task.missionObjective ||
+    task.executionMetadata?.missionObjective ||
+    context.mission?.objective ||
+    ''
+  ).trim();
+
   const title = (task.title || '').trim();
   const desc = (task.description || '').trim();
+  const taskInput = (task.input?.query || task.input?.objective || context.input?.query || '').trim();
 
-  // Strip common prompt prefixes: "Research:", "Investigate:", "Task 1:", etc.
-  let cleaned = title.replace(/^(task\s*\d*[:\-]|research[:\-]|investigate[:\-]|analyze[:\-])/i, '').trim();
+  // 2. Identify if task title is a generic workflow placeholder
+  const isGenericTitle = !title || GENERIC_PHASE_TITLE_REGEX.test(title) || title.length < 10;
 
-  if (cleaned.length < 5 && desc.length > 0) {
-    cleaned = desc.slice(0, 100);
+  // 3. Select primary candidate text
+  let candidateText = '';
+  if (taskInput) {
+    candidateText = taskInput;
+  } else if (isGenericTitle && missionObjective) {
+    candidateText = missionObjective;
+  } else if (!isGenericTitle && title) {
+    candidateText = title;
+  } else if (missionObjective) {
+    candidateText = missionObjective;
+  } else if (desc) {
+    candidateText = desc;
   }
 
-  return cleaned || 'AI agent architecture';
+  // 4. Sanitize: Neutralize prompt injection phrases
+  let sanitized = candidateText.replace(PROMPT_INJECTION_DIRECTIVES_REGEX, ' ').trim();
+
+  // 5. Clean operational prefixes and conversational suffixes
+  sanitized = sanitized.replace(QUERY_PREFIX_CLEAN_REGEX, '').trim();
+  sanitized = sanitized.replace(QUERY_SUFFIX_CLEAN_REGEX, '').trim();
+  sanitized = sanitized.replace(/^(and\s+|for\s+|with\s+|to\s+|about\s+|on\s+)+/i, '').trim();
+
+  // Clean common non-alphanumeric punctuation except hyphens and dots (e.g. Node.js)
+  sanitized = sanitized.replace(/[,;:"'(){}\[\]<>?!\\\/_+=*&^%$#@~`]+/g, ' ');
+  sanitized = sanitized.replace(/\s+/g, ' ').trim();
+
+  // 6. Enforce query length bounding (max 100 characters, truncated at word boundary)
+  if (sanitized.length > 100) {
+    sanitized = sanitized.slice(0, 100);
+    const lastSpace = sanitized.lastIndexOf(' ');
+    if (lastSpace > 40) {
+      sanitized = sanitized.slice(0, lastSpace);
+    }
+    sanitized = sanitized.trim();
+  }
+
+  // 7. Safe fallback if cleaned text is too short or empty
+  if (sanitized.length < 3) {
+    if (title && !GENERIC_PHASE_TITLE_REGEX.test(title)) {
+      return title.slice(0, 80);
+    }
+    return 'AI agent architecture';
+  }
+
+  return sanitized;
 }
 
 /**
@@ -113,7 +192,7 @@ async function executeResearchTask(task, context = {}) {
   }
 
   // 2. Build focused search query
-  const query = buildSearchQuery(task);
+  const query = buildSearchQuery(task, context);
   const queryCount = 1;
 
   // 3. Search web (limited to 5 candidates)
@@ -211,6 +290,7 @@ async function executeResearchTask(task, context = {}) {
       evidenceCount,
       sources: retrievedSources,
       evidence: evidenceItems,
+      candidates: validCandidates,
     },
   };
 }
@@ -223,4 +303,6 @@ const researchAgent = createAgent({
   executeHandler: executeResearchTask,
 });
 
+researchAgent.buildSearchQuery = buildSearchQuery;
 module.exports = researchAgent;
+module.exports.buildSearchQuery = buildSearchQuery;

@@ -76,6 +76,12 @@ async function executeTaskWithAgent(task, context = {}) {
     throw new Error('Invalid task: missing taskId or _id');
   }
 
+  const missionObjective = task.missionObjective ||
+    task.executionMetadata?.missionObjective ||
+    context.missionObjective ||
+    context.options?.missionObjective ||
+    undefined;
+
   const normalizedTask = {
     taskId,
     missionId: task.missionId ? task.missionId.toString() : null,
@@ -83,6 +89,11 @@ async function executeTaskWithAgent(task, context = {}) {
     title: task.title || '',
     description: task.description || '',
     order: task.order || 1,
+    url: task.url || undefined,
+    targetUrl: task.targetUrl || undefined,
+    input: task.input || undefined,
+    operation: task.operation || undefined,
+    missionObjective,
   };
 
   // 2. Determine target agent

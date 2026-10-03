@@ -28,6 +28,25 @@ const missionTaskSchema = new mongoose.Schema(
       required: true,
       min: 1,
     },
+    agentId: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    url: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    error: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    executionMetadata: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
   },
   {
     timestamps: true,

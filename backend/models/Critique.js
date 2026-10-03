@@ -123,6 +123,10 @@ const critiqueSchema = new mongoose.Schema(
       enum: ['gemini', 'deterministic'],
       required: true,
     },
+    evidenceIntelligence: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
   },
   {
     timestamps: true,

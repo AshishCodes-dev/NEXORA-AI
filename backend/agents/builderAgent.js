@@ -37,6 +37,7 @@ async function executeBuilderTask(task, context = {}) {
     missionId,
     taskId,
     options: context.options || {},
+    missionObjective: context.missionObjective,
   });
 
   return result;

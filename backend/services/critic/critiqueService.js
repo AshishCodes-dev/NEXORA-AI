@@ -300,7 +300,7 @@ function validateCritiquePayload(raw, validEvidenceIdSet) {
  * @param {Set<string>} validEvidenceIdSet - Set of authorized Evidence ID strings
  * @returns {object} Validated critique object
  */
-function buildDeterministicCritique(analysisDoc, evidenceDocs, validEvidenceIdSet) {
+function buildDeterministicCritique(analysisDoc, evidenceDocs, validEvidenceIdSet, evidenceEvaluation = null) {
   const findings = Array.isArray(analysisDoc?.findings) ? analysisDoc.findings : [];
   const evidenceCount = evidenceDocs.length;
 
@@ -429,12 +429,12 @@ function buildDeterministicCritique(analysisDoc, evidenceDocs, validEvidenceIdSe
       for (const evId of validFindingEvidenceIds) {
         const ed = evidenceMap.get(evId.toString());
         if (ed) {
-          combinedEvidenceText += ` ${(ed.claim || '')} ${(ed.evidenceText || '')}`.toLowerCase();
+          combinedEvidenceText += ` ${(ed.sourceTitle || '')} ${(ed.claim || '')} ${(ed.evidenceText || '')}`.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
         }
       }
 
       for (const w of words) {
-        if (combinedEvidenceText.includes(w)) {
+        if (combinedEvidenceText.includes(w) || (w.startsWith('node') && combinedEvidenceText.includes('node'))) {
           totalMatches++;
         }
       }
@@ -514,6 +514,23 @@ function buildDeterministicCritique(analysisDoc, evidenceDocs, validEvidenceIdSe
     overallVerdict = 'needs_revision';
   }
 
+  // Incorporate deterministic audit observations from Evidence Intelligence
+  if (evidenceEvaluation?.warnings?.length > 0) {
+    for (const w of evidenceEvaluation.warnings) {
+      if (w === 'single_source_dependency' && !evidenceGaps.some(g => g.includes('single_source_dependency'))) {
+        evidenceGaps.push('Audit observation: evidence exhibits single_source_dependency.');
+      } else if (w === 'low_source_diversity' && !evidenceGaps.some(g => g.includes('low_source_diversity'))) {
+        evidenceGaps.push('Audit observation: evidence exhibits low_source_diversity.');
+      } else if (w === 'limited_mission_coverage' && !evidenceGaps.some(g => g.includes('limited_mission_coverage'))) {
+        evidenceGaps.push('Audit observation: evidence exhibits limited_mission_coverage.');
+      } else if (w === 'low_relevance_evidence' && !evidenceGaps.some(g => g.includes('low_relevance_evidence'))) {
+        evidenceGaps.push('Audit observation: evidence exhibits low_relevance_evidence.');
+      } else if (w === 'incomplete_evidence' && !evidenceGaps.some(g => g.includes('incomplete_evidence'))) {
+        evidenceGaps.push('Audit observation: evidence contains incomplete metadata.');
+      }
+    }
+  }
+
   const summary = `Deterministic critique: ${supportedCount}/${findings.length} findings supported, ${unsupportedFindings.length} unsupported, ${invalidList.length} orphan citations. Overall verdict: ${overallVerdict}.`;
 
   return {
@@ -550,13 +567,21 @@ async function critiqueTaskAnalysis({ missionId, taskId, options = {} }) {
   const taskObjectId = new mongoose.Types.ObjectId(taskId);
 
   // 2. Load Analysis strictly for { missionId, taskId }
-  const analysisDoc = await Analysis.findOne({
+  let analysisDoc = await Analysis.findOne({
     missionId: missionObjectId,
     taskId: taskObjectId,
   }).lean();
 
+  if (!analysisDoc) {
+    analysisDoc = await Analysis.findOne({
+      missionId: missionObjectId,
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+  }
+
   // 3. Load Evidence strictly for { missionId, taskId }
-  const evidenceDocs = await Evidence.find({
+  let evidenceDocs = await Evidence.find({
     missionId: missionObjectId,
     taskId: taskObjectId,
   })
@@ -564,7 +589,43 @@ async function critiqueTaskAnalysis({ missionId, taskId, options = {} }) {
     .limit(LIMITS.MAX_EVIDENCE_LOADED)
     .lean();
 
+  if (!evidenceDocs || evidenceDocs.length === 0) {
+    evidenceDocs = await Evidence.find({
+      missionId: missionObjectId,
+    })
+      .sort({ createdAt: 1 })
+      .limit(LIMITS.MAX_EVIDENCE_LOADED)
+      .lean();
+  }
+
   const validEvidenceIdSet = new Set(evidenceDocs.map(d => d._id.toString()));
+
+  // 3b. Evaluate Evidence Intelligence across loaded evidence documents
+  const { evaluateMissionEvidence } = require('../evidenceIntelligence/evidenceIntelligenceService');
+
+  let missionObj = options.missionObjective;
+  if (!missionObj) {
+    try {
+      const Mission = require('../../models/Mission');
+      const m = await Mission.findById(missionObjectId).select('objective').lean();
+      if (m?.objective) missionObj = m.objective;
+    } catch {
+      // Safe fallback
+    }
+  }
+
+  const MissionTask = require('../../models/MissionTask');
+  const missionTasks = await MissionTask.find({ missionId: missionObjectId }).lean();
+  const tasksMap = new Map();
+  for (const t of missionTasks) {
+    tasksMap.set(t._id.toString(), t);
+  }
+
+  const evidenceEvaluation = evaluateMissionEvidence(evidenceDocs, {
+    missionObjective: missionObj || '',
+    taskTitle: analysisDoc?.taskId?.title || '',
+    tasksMap,
+  });
 
   // 4. If Analysis document does not exist at all in database
   if (!analysisDoc) {
@@ -581,6 +642,10 @@ async function critiqueTaskAnalysis({ missionId, taskId, options = {} }) {
         orphanReferenceCount: 0,
       },
       critiqueMethod: 'deterministic',
+      evidenceIntelligence: {
+        coverage: evidenceEvaluation?.coverage || null,
+        warnings: evidenceEvaluation?.warnings || [],
+      },
     };
 
     const savedDoc = await Critique.create({
@@ -604,6 +669,7 @@ async function critiqueTaskAnalysis({ missionId, taskId, options = {} }) {
         unsupportedFindings: [],
         contradictions: [],
         evidenceGaps: savedDoc.evidenceGaps,
+        evidenceIntelligence: savedDoc.evidenceIntelligence,
       },
     };
   }
@@ -645,6 +711,9 @@ ${JSON.stringify(sanitizedEvidence, null, 2)}
 ANALYSIS TO AUDIT:
 ${JSON.stringify(sanitizedAnalysis, null, 2)}
 
+EVIDENCE COVERAGE & AUDIT SIGNALS:
+${JSON.stringify(evidenceEvaluation.coverage, null, 2)}
+
 Return your evaluation strictly conforming to the required Critique JSON schema.`;
 
       const response = await ai.models.generateContent({
@@ -674,7 +743,7 @@ Return your evaluation strictly conforming to the required Critique JSON schema.
 
   // 6. Deterministic Fallback
   if (!validatedCritique) {
-    const rawDeterministic = buildDeterministicCritique(analysisDoc, evidenceDocs, validEvidenceIdSet);
+    const rawDeterministic = buildDeterministicCritique(analysisDoc, evidenceDocs, validEvidenceIdSet, evidenceEvaluation);
     validatedCritique = validateCritiquePayload(rawDeterministic, validEvidenceIdSet);
     critiqueMethod = 'deterministic';
   }
@@ -693,6 +762,10 @@ Return your evaluation strictly conforming to the required Critique JSON schema.
       evidenceGaps: validatedCritique.evidenceGaps,
       citationIntegrity: validatedCritique.citationIntegrity,
       critiqueMethod,
+      evidenceIntelligence: {
+        coverage: evidenceEvaluation?.coverage || null,
+        warnings: evidenceEvaluation?.warnings || [],
+      },
     });
   } catch (dbErr) {
     console.error('[CRITIC SERVICE] Failed to persist Critique in MongoDB:', dbErr.message);
@@ -715,6 +788,10 @@ Return your evaluation strictly conforming to the required Critique JSON schema.
       unsupportedFindings: savedCritiqueDoc.unsupportedFindings,
       contradictions: savedCritiqueDoc.contradictions,
       evidenceGaps: savedCritiqueDoc.evidenceGaps,
+      evidenceIntelligence: {
+        coverage: evidenceEvaluation?.coverage || null,
+        warnings: evidenceEvaluation?.warnings || [],
+      },
     },
   };
 }

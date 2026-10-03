@@ -13,4 +13,6 @@ pnpm-debug.log*
 .env.*
 !.env.example
 scratch/
-
+.agent/
+.agents/
+skills-lock.json

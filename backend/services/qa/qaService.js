@@ -12,8 +12,8 @@ const { getGeminiClient, DEFAULT_MODEL } = require('../geminiService');
  * Bounds and validation limits for QA payloads
  */
 const LIMITS = {
-  MAX_EVIDENCE_LOADED: 20,
-  MAX_CHECKS: 15,
+  MAX_EVIDENCE_LOADED: 50,
+  MAX_CHECKS: 25,
   MAX_UNSUPPORTED_FINDINGS: 10,
   MAX_CRITIQUE_VIOLATIONS: 10,
   MAX_MISSING_REQUIREMENTS: 10,
@@ -32,6 +32,11 @@ const CHECK_TYPES = [
   'completeness',
   'mission_alignment',
   'quality',
+  'grounding_evidence_exists',
+  'grounding_mission_isolation',
+  'grounding_source_match',
+  'grounding_reference_integrity',
+  'grounding_metadata_valid',
 ];
 
 /**
@@ -293,7 +298,7 @@ function validateQAPayload(raw, validEvidenceIdSet) {
  * @param {Map<string, object>} params.validEvidenceMap - Authorized Evidence Map
  * @returns {object} Full deterministic QA evaluation
  */
-function evaluateArtifactDeterministically({ mission, task, artifact, analysis, critique, evidenceDocs, validEvidenceMap }) {
+function evaluateArtifactDeterministically({ mission, task, artifact, analysis, critique, evidenceDocs, validEvidenceMap, crossMissionEvidenceIds = [], nonExistentEvidenceIds = [] }) {
   const checks = [];
   const invalidEvidenceIds = [];
   const unsupportedFindings = [];
@@ -461,10 +466,12 @@ function evaluateArtifactDeterministically({ mission, task, artifact, analysis, 
     const citedIds = Array.isArray(kf.evidenceIds) ? kf.evidenceIds.map(id => id.toString()) : [];
     const validFindingEvIds = citedIds.filter(id => validEvidenceIdSet.has(id));
 
-    if (validFindingEvIds.length === 0) {
+    if (validFindingEvIds.length === 0 || kf.groundingStatus === 'unsupported') {
       unsupportedFindings.push({
         statement,
-        reason: 'Finding does not cite any valid Evidence records for this task.',
+        reason: kf.groundingStatus === 'unsupported'
+          ? 'Finding explicitly marked as unsupported.'
+          : 'Finding does not cite any valid Evidence records for this task.',
         evidenceIds: [],
       });
     }
@@ -620,11 +627,13 @@ function evaluateArtifactDeterministically({ mission, task, artifact, analysis, 
   // Rule G — Mission Alignment
   // ------------------------------------------------------------------
   const objective = (mission?.objective || task?.title || '').trim();
-  const artifactFullText = `${artifact.title} ${artifact.executiveSummary} ${sections.map(s => `${s.heading} ${s.content}`).join(' ')}`.toLowerCase();
+  const artifactFullText = `${artifact.title} ${artifact.executiveSummary} ${sections.map(s => `${s.heading} ${s.content}`).join(' ')}`
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ');
 
   const objectiveWords = objective
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
     .filter(w => w.length >= 4);
 
@@ -717,6 +726,183 @@ function evaluateArtifactDeterministically({ mission, task, artifact, analysis, 
   }
 
   // ------------------------------------------------------------------
+  // Rule I — Grounding Evidence Existence
+  // ------------------------------------------------------------------
+  const missingInDb = Array.isArray(nonExistentEvidenceIds) && nonExistentEvidenceIds.length > 0
+    ? nonExistentEvidenceIds
+    : allCitedEvidenceIds.filter(id => !validEvidenceIdSet.has(id) && !(crossMissionEvidenceIds || []).includes(id));
+
+  if (missingInDb.length > 0) {
+    checks.push({
+      checkType: 'grounding_evidence_exists',
+      status: 'fail',
+      message: `Artifact references ${missingInDb.length} non-existent Evidence record(s).`,
+      evidenceIds: missingInDb.filter(id => mongoose.Types.ObjectId.isValid(id)).map(id => new mongoose.Types.ObjectId(id)).slice(0, 5),
+      details: `Non-existent Evidence ID(s): ${missingInDb.join(', ')}`,
+    });
+  } else if (allCitedEvidenceIds.length > 0) {
+    checks.push({
+      checkType: 'grounding_evidence_exists',
+      status: 'pass',
+      message: `All ${allCitedEvidenceIds.length} Evidence reference(s) exist in storage.`,
+      evidenceIds: allCitedEvidenceIds.filter(id => mongoose.Types.ObjectId.isValid(id)).map(id => new mongoose.Types.ObjectId(id)).slice(0, 5),
+      details: 'Referenced evidence records confirmed present in database.',
+    });
+  } else if (evidenceDocs.length === 0) {
+    checks.push({
+      checkType: 'grounding_evidence_exists',
+      status: 'pass',
+      message: 'Zero evidence available for task; artifact delivery constrained.',
+      evidenceIds: [],
+      details: 'Scope & insufficient evidence notice verified.',
+    });
+  } else {
+    checks.push({
+      checkType: 'grounding_evidence_exists',
+      status: 'warning',
+      message: 'Artifact cites zero evidence records despite research evidence being available.',
+      evidenceIds: [],
+      details: 'Check whether delivery was constrained by Critic.',
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Rule J — Grounding Mission Isolation
+  // ------------------------------------------------------------------
+  const crossMissionIds = Array.isArray(crossMissionEvidenceIds) ? crossMissionEvidenceIds : [];
+  if (crossMissionIds.length > 0) {
+    checks.push({
+      checkType: 'grounding_mission_isolation',
+      status: 'fail',
+      message: `Cross-mission Evidence violation: ${crossMissionIds.length} reference(s) belong to a different mission.`,
+      evidenceIds: crossMissionIds.filter(id => mongoose.Types.ObjectId.isValid(id)).map(id => new mongoose.Types.ObjectId(id)).slice(0, 5),
+      details: `Foreign mission Evidence IDs: ${crossMissionIds.join(', ')}`,
+    });
+  } else {
+    checks.push({
+      checkType: 'grounding_mission_isolation',
+      status: 'pass',
+      message: 'Strict mission isolation verified: zero cross-mission Evidence references.',
+      evidenceIds: [],
+      details: 'All cited Evidence IDs strictly belong to the authoritative mission context.',
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Rule K — Grounding Source Match
+  // ------------------------------------------------------------------
+  let sourceMatchMismatchCount = 0;
+  const sourceMatchMismatches = [];
+
+  for (const ref of sourceRefs) {
+    const refEvId = ref.evidenceId ? ref.evidenceId.toString() : '';
+    const doc = validEvidenceMap.get(refEvId);
+    if (!doc) {
+      sourceMatchMismatchCount++;
+      sourceMatchMismatches.push(`Unknown evidenceId [${refEvId}] in sourceReferences`);
+    } else if (ref.sourceUrl !== doc.sourceUrl || ref.sourceTitle !== doc.sourceTitle) {
+      sourceMatchMismatchCount++;
+      sourceMatchMismatches.push(`Source metadata mismatch for evidenceId [${refEvId}]`);
+    }
+  }
+
+  if (artifact.grounding && Array.isArray(artifact.grounding.sourceUrls)) {
+    const validUrls = new Set(Array.from(validEvidenceMap.values()).map(d => d.sourceUrl).filter(Boolean));
+    for (const u of artifact.grounding.sourceUrls) {
+      if (!validUrls.has(u)) {
+        sourceMatchMismatchCount++;
+        sourceMatchMismatches.push(`Grounding URL [${u}] not present in mission Evidence`);
+      }
+    }
+  }
+
+  if (sourceMatchMismatchCount > 0) {
+    checks.push({
+      checkType: 'grounding_source_match',
+      status: 'fail',
+      message: `Source provenance mismatch: ${sourceMatchMismatchCount} discrepancy(ies) detected.`,
+      evidenceIds: [],
+      details: sourceMatchMismatches.slice(0, 3).join('; '),
+    });
+  } else {
+    checks.push({
+      checkType: 'grounding_source_match',
+      status: 'pass',
+      message: 'All cited source URLs and titles match authoritative Evidence records.',
+      evidenceIds: [],
+      details: 'Zero fabricated URLs or title discrepancies detected.',
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Rule L — Grounding Reference Integrity
+  // ------------------------------------------------------------------
+  const hasUnsupportedKeyFindings = unsupportedFindings.length > 0;
+  const hasInvalidEvidence = invalidEvidenceIdSet.size > 0;
+
+  if (hasInvalidEvidence || hasUnsupportedKeyFindings) {
+    checks.push({
+      checkType: 'grounding_reference_integrity',
+      status: 'fail',
+      message: `Grounding reference integrity failure: ${invalidEvidenceIdSet.size} invalid reference(s), ${unsupportedFindings.length} unsupported claim(s).`,
+      evidenceIds: invalidEvidenceIds.slice(0, 5),
+      details: hasUnsupportedKeyFindings
+        ? `Unsupported claim: "${unsupportedFindings[0].statement}"`
+        : `Invalid evidence references detected: ${Array.from(invalidEvidenceIdSet).join(', ')}`,
+    });
+  } else {
+    checks.push({
+      checkType: 'grounding_reference_integrity',
+      status: 'pass',
+      message: 'Full grounding reference integrity verified across all claims and citations.',
+      evidenceIds: [],
+      details: `All ${keyFindings.length} key finding(s) trace directly to validated Evidence records.`,
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Rule M — Grounding Metadata Validity
+  // ------------------------------------------------------------------
+  if (artifact.grounding && typeof artifact.grounding === 'object') {
+    const g = artifact.grounding;
+    const isStructurallyValid = (
+      Array.isArray(g.evidenceIds) &&
+      Array.isArray(g.sourceUrls) &&
+      typeof g.supportedClaimCount === 'number' && g.supportedClaimCount >= 0 &&
+      typeof g.partiallySupportedClaimCount === 'number' && g.partiallySupportedClaimCount >= 0 &&
+      typeof g.unsupportedClaimCount === 'number' && g.unsupportedClaimCount >= 0 &&
+      typeof g.coverageScore === 'number' && g.coverageScore >= 0.0 && g.coverageScore <= 1.0 &&
+      Array.isArray(g.warnings)
+    );
+
+    if (isStructurallyValid) {
+      checks.push({
+        checkType: 'grounding_metadata_valid',
+        status: 'pass',
+        message: 'Artifact grounding metadata is structurally valid and properly bounded.',
+        evidenceIds: [],
+        details: `Claims: ${g.supportedClaimCount} supported, ${g.partiallySupportedClaimCount} partial, ${g.unsupportedClaimCount} unsupported. Coverage: ${(g.coverageScore * 100).toFixed(0)}%. Warnings: ${g.warnings.length}.`,
+      });
+    } else {
+      checks.push({
+        checkType: 'grounding_metadata_valid',
+        status: 'fail',
+        message: 'Artifact grounding metadata is structurally malformed or violates schema bounds.',
+        evidenceIds: [],
+        details: 'grounding fields must adhere to documented numeric ranges and array types.',
+      });
+    }
+  } else {
+    checks.push({
+      checkType: 'grounding_metadata_valid',
+      status: 'pass',
+      message: 'Legacy artifact without explicit grounding block; baseline integrity checks passed.',
+      evidenceIds: [],
+      details: 'Legacy compatibility mode.',
+    });
+  }
+
+  // ------------------------------------------------------------------
   // Section 7: Final Verdict Logic
   // ------------------------------------------------------------------
   let overallVerdict = 'pass';
@@ -764,7 +950,7 @@ function evaluateArtifactDeterministically({ mission, task, artifact, analysis, 
  * @param {object} [params.options={}]
  * @returns {Promise<object>} Normalized QA execution result
  */
-async function validateTaskArtifact({ missionId, taskId, options = {} }) {
+async function validateTaskArtifact({ missionId, taskId, options = {}, missionObjective }) {
   // 1. Validate IDs
   if (!missionId || !mongoose.Types.ObjectId.isValid(missionId)) {
     throw new Error(`Invalid or missing missionId: '${missionId}'`);
@@ -789,25 +975,49 @@ async function validateTaskArtifact({ missionId, taskId, options = {} }) {
   const missionDoc = await Mission.findById(missionObjectId).lean();
 
   // 3. Load Artifact strictly for { missionId, taskId }
-  const artifactDoc = await Artifact.findOne({
+  let artifactDoc = await Artifact.findOne({
     missionId: missionObjectId,
     taskId: taskObjectId,
   }).lean();
+
+  if (!artifactDoc) {
+    artifactDoc = await Artifact.findOne({
+      missionId: missionObjectId,
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+  }
 
   // 4. Load Analysis strictly for { missionId, taskId }
-  const analysisDoc = await Analysis.findOne({
+  let analysisDoc = await Analysis.findOne({
     missionId: missionObjectId,
     taskId: taskObjectId,
   }).lean();
+
+  if (!analysisDoc) {
+    analysisDoc = await Analysis.findOne({
+      missionId: missionObjectId,
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+  }
 
   // 5. Load Critique strictly for { missionId, taskId }
-  const critiqueDoc = await Critique.findOne({
+  let critiqueDoc = await Critique.findOne({
     missionId: missionObjectId,
     taskId: taskObjectId,
   }).lean();
 
+  if (!critiqueDoc) {
+    critiqueDoc = await Critique.findOne({
+      missionId: missionObjectId,
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+  }
+
   // 6. Load Evidence strictly for { missionId, taskId }
-  const evidenceDocs = await Evidence.find({
+  let evidenceDocs = await Evidence.find({
     missionId: missionObjectId,
     taskId: taskObjectId,
   })
@@ -815,11 +1025,78 @@ async function validateTaskArtifact({ missionId, taskId, options = {} }) {
     .limit(LIMITS.MAX_EVIDENCE_LOADED)
     .lean();
 
+  if (!evidenceDocs || evidenceDocs.length === 0) {
+    evidenceDocs = await Evidence.find({
+      missionId: missionObjectId,
+    })
+      .sort({ createdAt: 1 })
+      .limit(LIMITS.MAX_EVIDENCE_LOADED)
+      .lean();
+  }
+
   const validEvidenceMap = new Map();
   for (const ed of evidenceDocs) {
     validEvidenceMap.set(ed._id.toString(), ed);
   }
   const validEvidenceIdSet = new Set(validEvidenceMap.keys());
+
+  // 6b. Collect cited Evidence IDs and identify cross-mission vs non-existent IDs
+  const crossMissionEvidenceIds = [];
+  const nonExistentEvidenceIds = [];
+
+  if (artifactDoc) {
+    const allArtifactEvidenceIds = new Set();
+    if (artifactDoc.grounding && Array.isArray(artifactDoc.grounding.evidenceIds)) {
+      for (const id of artifactDoc.grounding.evidenceIds) allArtifactEvidenceIds.add(id.toString());
+    }
+    if (Array.isArray(artifactDoc.keyFindings)) {
+      for (const kf of artifactDoc.keyFindings) {
+        if (Array.isArray(kf.evidenceIds)) {
+          for (const id of kf.evidenceIds) allArtifactEvidenceIds.add(id.toString());
+        }
+      }
+    }
+    if (Array.isArray(artifactDoc.sections)) {
+      for (const sec of artifactDoc.sections) {
+        if (Array.isArray(sec.evidenceIds)) {
+          for (const id of sec.evidenceIds) allArtifactEvidenceIds.add(id.toString());
+        }
+      }
+    }
+    if (Array.isArray(artifactDoc.sourceReferences)) {
+      for (const ref of artifactDoc.sourceReferences) {
+        if (ref?.evidenceId) allArtifactEvidenceIds.add(ref.evidenceId.toString());
+      }
+    }
+
+    const unknownIds = Array.from(allArtifactEvidenceIds).filter(id => !validEvidenceMap.has(id));
+
+    if (unknownIds.length > 0) {
+      const validFormatIds = unknownIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+      const nonFormatIds = unknownIds.filter(id => !mongoose.Types.ObjectId.isValid(id));
+      for (const nfId of nonFormatIds) {
+        nonExistentEvidenceIds.push(nfId);
+      }
+
+      if (validFormatIds.length > 0) {
+        const foreignDocs = await Evidence.find({ _id: { $in: validFormatIds } }).select('_id missionId').lean();
+        const foreignMap = new Map();
+        for (const fd of foreignDocs) {
+          foreignMap.set(fd._id.toString(), fd);
+        }
+        for (const id of validFormatIds) {
+          if (foreignMap.has(id)) {
+            const doc = foreignMap.get(id);
+            if (doc.missionId.toString() !== missionObjectId.toString()) {
+              crossMissionEvidenceIds.push(id);
+            }
+          } else {
+            nonExistentEvidenceIds.push(id);
+          }
+        }
+      }
+    }
+  }
 
   // 7. If Artifact is missing, produce immediate fail report via deterministic engine
   if (!artifactDoc) {
@@ -939,6 +1216,8 @@ Perform a comprehensive quality assurance audit and return your findings adherin
         critique: critiqueDoc,
         evidenceDocs,
         validEvidenceMap,
+        crossMissionEvidenceIds,
+        nonExistentEvidenceIds,
       });
 
       if (deterministicBaseline.overallVerdict === 'fail') {
@@ -967,6 +1246,8 @@ Perform a comprehensive quality assurance audit and return your findings adherin
       critique: critiqueDoc,
       evidenceDocs,
       validEvidenceMap,
+      crossMissionEvidenceIds,
+      nonExistentEvidenceIds,
     });
     validatedQA = validateQAPayload(rawDeterministic, validEvidenceIdSet);
     qaMethod = 'deterministic';

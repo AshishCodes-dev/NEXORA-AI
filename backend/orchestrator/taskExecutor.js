@@ -25,8 +25,33 @@ async function executeTaskWork(task, options = {}) {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 
+  // Resolve mission context (objective) if available
+  let missionObjective = options.missionObjective || task.missionObjective || task.executionMetadata?.missionObjective || null;
+  if (!missionObjective && task.missionId) {
+    try {
+      const Mission = require('../models/Mission');
+      const m = await Mission.findById(task.missionId).select('objective').lean();
+      if (m?.objective) {
+        missionObjective = m.objective;
+      }
+    } catch {
+      // Safe fallback if lookup fails
+    }
+  }
+
   // Dispatch task to specialized agent through the Agent Execution Gateway
-  const agentResult = await executeTaskWithAgent(task, { options });
+  const context = {
+    options,
+    missionObjective,
+  };
+  const agentResult = await executeTaskWithAgent(task, context);
+  if (agentResult && agentResult.status === 'failed') {
+    const errorMsg = agentResult.message || `Agent [${agentResult.agentId}] returned failed status`;
+    const err = new Error(errorMsg);
+    err.code = agentResult.data?.error?.code || 'AGENT_FAILED';
+    err.data = agentResult.data;
+    throw err;
+  }
   return agentResult;
 }
 
@@ -85,12 +110,26 @@ async function executeMissionTask(taskId, options = {}) {
 
   // 4. Execute deterministic task work
   try {
-    await executeTaskWork(runningTask, options);
+    const agentResult = await executeTaskWork(runningTask, options);
 
-    // 5a. Transition: running -> completed
+    // 5a. Transition: running -> completed (recording executing agentId & executionMetadata)
+    const existingMetadata = runningTask.executionMetadata && typeof runningTask.executionMetadata === 'object'
+      ? runningTask.executionMetadata
+      : {};
+
     const completedTask = await MissionTask.findOneAndUpdate(
       { _id: taskId, status: 'running' },
-      { $set: { status: 'completed' } },
+      {
+        $set: {
+          status: 'completed',
+          agentId: agentResult?.agentId || runningTask.agentId || null,
+          error: null,
+          executionMetadata: {
+            ...existingMetadata,
+            resultData: agentResult?.data || null,
+          },
+        },
+      },
       { returnDocument: 'after' }
     );
 
@@ -98,13 +137,19 @@ async function executeMissionTask(taskId, options = {}) {
       throw new Error(`Failed to mark task ${taskId} as completed (concurrent state change)`);
     }
 
+    completedTask._agentResult = agentResult;
     return completedTask;
   } catch (workError) {
-    // 5b. Transition: running -> failed
+    // 5b. Transition: running -> failed (recording error message)
     console.error(`[TASK EXECUTOR] Task ${taskId} failed:`, workError.message);
     await MissionTask.findOneAndUpdate(
       { _id: taskId, status: 'running' },
-      { $set: { status: 'failed' } },
+      {
+        $set: {
+          status: 'failed',
+          error: workError.message,
+        },
+      },
       { returnDocument: 'after' }
     );
     throw workError;

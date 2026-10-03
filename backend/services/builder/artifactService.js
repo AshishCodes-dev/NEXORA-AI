@@ -6,12 +6,16 @@ const Analysis = require('../../models/Analysis');
 const Critique = require('../../models/Critique');
 const Evidence = require('../../models/Evidence');
 const { getGeminiClient, DEFAULT_MODEL } = require('../geminiService');
+const {
+  evaluateMissionEvidence,
+  calculateMissionCoverage,
+} = require('../evidenceIntelligence/evidenceIntelligenceService');
 
 /**
  * Operational limits and sizing constraints for Artifact generation
  */
 const LIMITS = {
-  MAX_EVIDENCE_LOADED: 20,
+  MAX_EVIDENCE_LOADED: 50,
   MAX_EVIDENCE_TEXT_LENGTH: 2000,
   MAX_ANALYSIS_FINDINGS: 10,
   MAX_CRITIQUE_REVIEWS: 10,
@@ -284,10 +288,20 @@ function validateArtifactPayload(raw, validEvidenceMap) {
       continue;
     }
 
+    const findingStatus = ['supported', 'partially_supported', 'unsupported'].includes(kf.groundingStatus)
+      ? kf.groundingStatus
+      : 'supported';
+
+    const findingUrls = Array.isArray(kf.sourceUrls)
+      ? kf.sourceUrls.map(u => String(u || '').trim()).filter(Boolean)
+      : Array.from(new Set(kfEvidenceIds.map(id => validEvidenceMap.get(id.toString())?.sourceUrl).filter(Boolean)));
+
     validatedKeyFindings.push({
       statement: kf.statement.trim().slice(0, LIMITS.MAX_STATEMENT_LENGTH),
       evidenceIds: kfEvidenceIds,
       confidence: kf.confidence,
+      groundingStatus: findingStatus,
+      sourceUrls: findingUrls,
     });
 
     if (validatedKeyFindings.length >= LIMITS.MAX_KEY_FINDINGS) break;
@@ -329,6 +343,66 @@ function validateArtifactPayload(raw, validEvidenceMap) {
     sourceReferences = sanitizeSourceReferences(refsToSanitize, validEvidenceMap);
   }
 
+  // 9. Grounding Metadata (Bounded and Verified against MongoDB Evidence)
+  let grounding = null;
+  if (raw.grounding && typeof raw.grounding === 'object') {
+    const g = raw.grounding;
+    const gEvidenceIds = [];
+    if (Array.isArray(g.evidenceIds)) {
+      for (const idStr of g.evidenceIds) {
+        const cleanId = String(idStr || '').trim();
+        if (validEvidenceMap.has(cleanId)) {
+          gEvidenceIds.push(new mongoose.Types.ObjectId(cleanId));
+        }
+      }
+    }
+    const gSourceUrls = Array.isArray(g.sourceUrls)
+      ? g.sourceUrls.map(u => String(u || '').trim()).filter(Boolean).slice(0, LIMITS.MAX_SOURCE_REFERENCES)
+      : [];
+    const supportedClaimCount = typeof g.supportedClaimCount === 'number' && g.supportedClaimCount >= 0 ? g.supportedClaimCount : 0;
+    const partiallySupportedClaimCount = typeof g.partiallySupportedClaimCount === 'number' && g.partiallySupportedClaimCount >= 0 ? g.partiallySupportedClaimCount : 0;
+    const unsupportedClaimCount = typeof g.unsupportedClaimCount === 'number' && g.unsupportedClaimCount >= 0 ? g.unsupportedClaimCount : 0;
+    const coverageScore = typeof g.coverageScore === 'number' ? Math.min(1.0, Math.max(0.0, g.coverageScore)) : 0;
+    const gWarnings = Array.isArray(g.warnings)
+      ? g.warnings.map(w => String(w || '').trim()).filter(Boolean).slice(0, LIMITS.MAX_LIMITATIONS)
+      : [];
+
+    grounding = {
+      evidenceIds: gEvidenceIds,
+      sourceUrls: gSourceUrls,
+      supportedClaimCount,
+      partiallySupportedClaimCount,
+      unsupportedClaimCount,
+      coverageScore,
+      warnings: gWarnings,
+    };
+  } else {
+    const citedEvidenceIdSet = new Set();
+    for (const kf of validatedKeyFindings) {
+      for (const id of kf.evidenceIds) citedEvidenceIdSet.add(id.toString());
+    }
+    for (const sec of validatedSections) {
+      for (const id of sec.evidenceIds) citedEvidenceIdSet.add(id.toString());
+    }
+    const gEvidenceIds = Array.from(citedEvidenceIdSet).map(id => new mongoose.Types.ObjectId(id));
+    const gSourceUrls = Array.from(new Set(
+      gEvidenceIds.map(id => validEvidenceMap.get(id.toString())?.sourceUrl).filter(Boolean)
+    ));
+    const supportedClaimCount = validatedKeyFindings.filter(k => k.groundingStatus === 'supported').length;
+    const partiallySupportedClaimCount = validatedKeyFindings.filter(k => k.groundingStatus === 'partially_supported').length;
+    const unsupportedClaimCount = validatedKeyFindings.filter(k => k.groundingStatus === 'unsupported').length;
+
+    grounding = {
+      evidenceIds: gEvidenceIds,
+      sourceUrls: gSourceUrls,
+      supportedClaimCount,
+      partiallySupportedClaimCount,
+      unsupportedClaimCount,
+      coverageScore: 1.0,
+      warnings: [],
+    };
+  }
+
   return {
     artifactType: raw.artifactType,
     title,
@@ -338,6 +412,7 @@ function validateArtifactPayload(raw, validEvidenceMap) {
     limitations,
     unresolvedQuestions,
     sourceReferences,
+    grounding,
   };
 }
 
@@ -363,9 +438,26 @@ function validateArtifactPayload(raw, validEvidenceMap) {
  * @param {Map<string, object>} params.validEvidenceMap - Map of authorized Evidence IDs to docs
  * @returns {object} Validated artifact payload
  */
-function buildDeterministicArtifact({ task, objective, analysisDoc, critiqueDoc, evidenceDocs, validEvidenceMap }) {
+function buildDeterministicArtifact({ task, objective, analysisDoc, critiqueDoc, evidenceDocs, validEvidenceMap, evidenceIntel }) {
   const artifactType = determineArtifactType(objective || task?.title || '');
-  const title = task?.title ? `${task.title} - Deliverable Artifact` : 'Mission Deliverable Artifact';
+  const title = objective
+    ? `${objective} - Deliverable ${artifactType.charAt(0).toUpperCase() + artifactType.slice(1)}`
+    : (task?.title ? `${task.title} - Deliverable Artifact` : 'Mission Deliverable Artifact');
+
+  // Compute Evidence Intelligence if not provided
+  if (!evidenceIntel && evidenceDocs && evidenceDocs.length > 0) {
+    evidenceIntel = evaluateMissionEvidence(evidenceDocs, {
+      missionObjective: objective || task?.title || '',
+      taskTitle: task?.title || '',
+    });
+  }
+
+  const rankMap = new Map();
+  if (evidenceIntel?.rankedEvidence) {
+    evidenceIntel.rankedEvidence.forEach((re, idx) => {
+      if (re.evidenceId) rankMap.set(re.evidenceId.toString(), idx);
+    });
+  }
 
   const limitations = [];
   const unresolvedQuestions = [];
@@ -409,8 +501,53 @@ function buildDeterministicArtifact({ task, objective, analysisDoc, critiqueDoc,
     }
   }
 
+  // 1b. Step 8: Preserve Critique and Evidence Intelligence audit warnings as bounded artifact limitations
+  const recognizedAuditWarnings = [
+    'low_relevance_evidence',
+    'incomplete_evidence',
+    'single_source_dependency',
+    'low_source_diversity',
+    'limited_mission_coverage',
+  ];
+  const activeAuditWarnings = new Set();
+  if (Array.isArray(evidenceIntel?.warnings)) {
+    for (const w of evidenceIntel.warnings) {
+      if (recognizedAuditWarnings.includes(w)) activeAuditWarnings.add(w);
+    }
+  }
+  if (Array.isArray(critiqueDoc?.evidenceIntelligence?.warnings)) {
+    for (const w of critiqueDoc.evidenceIntelligence.warnings) {
+      if (recognizedAuditWarnings.includes(w)) activeAuditWarnings.add(w);
+    }
+  }
+
+  for (const w of activeAuditWarnings) {
+    let limText = '';
+    switch (w) {
+      case 'single_source_dependency':
+        limText = 'Audit limitation: High single-source concentration detected in evidence base.';
+        break;
+      case 'low_source_diversity':
+        limText = 'Audit limitation: Low source diversity across discovered research evidence.';
+        break;
+      case 'limited_mission_coverage':
+        limText = 'Audit limitation: Partial keyword coverage of mission objective concepts.';
+        break;
+      case 'low_relevance_evidence':
+        limText = 'Audit limitation: Some evidence records exhibited low keyword relevance.';
+        break;
+      case 'incomplete_evidence':
+        limText = 'Audit limitation: Certain evidence records lacked complete metadata fields.';
+        break;
+    }
+    if (limText && !limitations.includes(limText)) {
+      limitations.push(limText);
+    }
+  }
+
   // 2. Filter and ground Analysis findings (Rules A, B, C, D)
   const analysisFindings = Array.isArray(analysisDoc?.findings) ? analysisDoc.findings : [];
+  const candidateFindings = [];
 
   for (let i = 0; i < analysisFindings.length; i++) {
     const f = analysisFindings[i];
@@ -439,7 +576,6 @@ function buildDeterministicArtifact({ task, objective, analysisDoc, critiqueDoc,
       const idStr = id ? id.toString() : '';
       if (validEvidenceMap.has(idStr)) {
         validIds.push(new mongoose.Types.ObjectId(idStr));
-        citedEvidenceIdSet.add(idStr);
       }
     }
 
@@ -449,21 +585,52 @@ function buildDeterministicArtifact({ task, objective, analysisDoc, critiqueDoc,
     // Rule D: Partially supported findings receive cautious language & calibrated confidence
     let calibratedConfidence = f.confidence || 'medium';
     let formattedStatement = statement;
+    let groundingStatus = 'supported';
 
     if (review?.verdict === 'partially_supported') {
       calibratedConfidence = 'medium';
+      groundingStatus = 'partially_supported';
       if (!formattedStatement.toLowerCase().startsWith('partial evidence')) {
         formattedStatement = `Partial evidence indicates: ${formattedStatement}`;
       }
       limitations.push(`Preliminary finding with partial evidence: "${statement}"`);
     }
 
-    keyFindings.push({
+    // Determine synthesis priority based on best evidence rank
+    let bestRank = 999;
+    for (const vid of validIds) {
+      const r = rankMap.has(vid.toString()) ? rankMap.get(vid.toString()) : 999;
+      if (r < bestRank) bestRank = r;
+    }
+
+    const findingSourceUrls = Array.from(new Set(
+      validIds.map(id => validEvidenceMap.get(id.toString())?.sourceUrl).filter(Boolean)
+    ));
+
+    candidateFindings.push({
       statement: formattedStatement.slice(0, LIMITS.MAX_STATEMENT_LENGTH),
       evidenceIds: validIds,
       confidence: calibratedConfidence,
+      groundingStatus,
+      sourceUrls: findingSourceUrls,
+      bestRank,
     });
+  }
 
+  // Prioritize findings backed by higher-quality/relevance evidence
+  candidateFindings.sort((a, b) => a.bestRank - b.bestRank);
+
+  for (const cf of candidateFindings) {
+    for (const vid of cf.evidenceIds) {
+      citedEvidenceIdSet.add(vid.toString());
+    }
+    keyFindings.push({
+      statement: cf.statement,
+      evidenceIds: cf.evidenceIds,
+      confidence: cf.confidence,
+      groundingStatus: cf.groundingStatus,
+      sourceUrls: cf.sourceUrls,
+    });
     if (keyFindings.length >= LIMITS.MAX_KEY_FINDINGS) break;
   }
 
@@ -480,12 +647,16 @@ function buildDeterministicArtifact({ task, objective, analysisDoc, critiqueDoc,
   let executiveSummary = '';
 
   if (keyFindings.length > 0) {
-    executiveSummary = `Evidence-derived deliverable (${artifactType}): synthesized ${keyFindings.length} verified key findings supported by ${citedEvidenceIdSet.size} authoritative evidence sources. Grounded against critical review.`;
+    executiveSummary = objective
+      ? `Evidence-derived deliverable (${artifactType}) for "${objective}": synthesized ${keyFindings.length} verified key findings supported by ${citedEvidenceIdSet.size} authoritative evidence sources. Grounded against critical review.`
+      : `Evidence-derived deliverable (${artifactType}): synthesized ${keyFindings.length} verified key findings supported by ${citedEvidenceIdSet.size} authoritative evidence sources. Grounded against critical review.`;
 
     // Overview section
     sections.push({
       heading: 'Executive Overview',
-      content: `This ${artifactType} summarizes verified technical findings extracted from empirical research evidence and audited for citation integrity.`,
+      content: objective
+        ? `This ${artifactType} summarizes verified technical findings for "${objective}", extracted from empirical research evidence and audited for citation integrity.`
+        : `This ${artifactType} summarizes verified technical findings extracted from empirical research evidence and audited for citation integrity.`,
       evidenceIds: Array.from(citedEvidenceIdSet).slice(0, 5).map(id => new mongoose.Types.ObjectId(id)),
     });
 
@@ -507,11 +678,15 @@ function buildDeterministicArtifact({ task, objective, analysisDoc, critiqueDoc,
     }
   } else {
     // Constrained artifact when no findings survive review or zero evidence exists (Rule F)
-    executiveSummary = `Constrained delivery: Insufficient verified evidence was available to establish definitive conclusions for this task. Available claims were marked unsupported or lacked grounding.`;
+    executiveSummary = objective
+      ? `Constrained delivery for "${objective}": Insufficient verified evidence was available to establish definitive conclusions. Available claims were marked unsupported or lacked grounding.`
+      : `Constrained delivery: Insufficient verified evidence was available to establish definitive conclusions for this task. Available claims were marked unsupported or lacked grounding.`;
 
     sections.push({
       heading: 'Scope & Insufficient Evidence Notice',
-      content: 'The synthesis pipeline completed with zero verified findings. Further technical investigation and empirical evidence collection are recommended before proceeding with implementation.',
+      content: objective
+        ? `The synthesis pipeline for "${objective}" completed with zero verified findings. Further technical investigation and empirical evidence collection are recommended before proceeding with implementation.`
+        : 'The synthesis pipeline completed with zero verified findings. Further technical investigation and empirical evidence collection are recommended before proceeding with implementation.',
       evidenceIds: [],
     });
 
@@ -519,7 +694,7 @@ function buildDeterministicArtifact({ task, objective, analysisDoc, critiqueDoc,
     unresolvedQuestions.push('What additional external sources are required to substantiate the task objective?');
   }
 
-  // 4. Reconstruct Source References strictly from MongoDB Evidence (Rule E)
+  // 4. Reconstruct Source References strictly from MongoDB Evidence (Rule E), ordered by evidence rank
   const sourceReferences = [];
   const evidenceIdsToRef = citedEvidenceIdSet.size > 0
     ? Array.from(citedEvidenceIdSet)
@@ -537,6 +712,34 @@ function buildDeterministicArtifact({ task, objective, analysisDoc, critiqueDoc,
     if (sourceReferences.length >= LIMITS.MAX_SOURCE_REFERENCES) break;
   }
 
+  sourceReferences.sort((a, b) => {
+    const idA = a.evidenceId ? a.evidenceId.toString() : '';
+    const idB = b.evidenceId ? b.evidenceId.toString() : '';
+    const rA = rankMap.has(idA) ? rankMap.get(idA) : 999;
+    const rB = rankMap.has(idB) ? rankMap.get(idB) : 999;
+    return rA - rB;
+  });
+
+  // 5. Construct Bounded Grounding Metadata
+  const citedEvidenceIdArray = Array.from(citedEvidenceIdSet).map(id => new mongoose.Types.ObjectId(id));
+  const citedSourceUrls = Array.from(new Set(
+    citedEvidenceIdArray.map(id => validEvidenceMap.get(id.toString())?.sourceUrl).filter(Boolean)
+  ));
+  const supportedClaimCount = keyFindings.filter(k => k.groundingStatus === 'supported').length;
+  const partiallySupportedClaimCount = keyFindings.filter(k => k.groundingStatus === 'partially_supported').length;
+  const unsupportedClaimCount = keyFindings.filter(k => k.groundingStatus === 'unsupported').length;
+  const coverageScore = evidenceIntel?.coverage?.missionCoverageScore ?? (citedEvidenceIdSet.size > 0 ? 0.8 : 0.0);
+
+  const grounding = {
+    evidenceIds: citedEvidenceIdArray,
+    sourceUrls: citedSourceUrls,
+    supportedClaimCount,
+    partiallySupportedClaimCount,
+    unsupportedClaimCount,
+    coverageScore,
+    warnings: Array.from(activeAuditWarnings),
+  };
+
   return {
     artifactType,
     title: title.slice(0, LIMITS.MAX_TITLE_LENGTH),
@@ -546,6 +749,7 @@ function buildDeterministicArtifact({ task, objective, analysisDoc, critiqueDoc,
     limitations: limitations.slice(0, LIMITS.MAX_LIMITATIONS),
     unresolvedQuestions: unresolvedQuestions.slice(0, LIMITS.MAX_UNRESOLVED_QUESTIONS),
     sourceReferences,
+    grounding,
   };
 }
 
@@ -569,7 +773,7 @@ function buildDeterministicArtifact({ task, objective, analysisDoc, critiqueDoc,
  * @param {object} [params.options={}]
  * @returns {Promise<object>} Normalized builder execution result
  */
-async function buildTaskArtifact({ missionId, taskId, options = {} }) {
+async function buildTaskArtifact({ missionId, taskId, options = {}, missionObjective }) {
   // 1. Validate IDs
   if (!missionId || !mongoose.Types.ObjectId.isValid(missionId)) {
     throw new Error(`Invalid or missing missionId: '${missionId}'`);
@@ -592,22 +796,38 @@ async function buildTaskArtifact({ missionId, taskId, options = {} }) {
   }
 
   const missionDoc = await Mission.findById(missionObjectId).lean();
-  const objective = missionDoc?.objective || taskDoc.title || '';
+  const objective = missionObjective || missionDoc?.objective || taskDoc.title || '';
 
   // 3. Load Analysis strictly for { missionId, taskId }
-  const analysisDoc = await Analysis.findOne({
+  let analysisDoc = await Analysis.findOne({
     missionId: missionObjectId,
     taskId: taskObjectId,
   }).lean();
+
+  if (!analysisDoc) {
+    analysisDoc = await Analysis.findOne({
+      missionId: missionObjectId,
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+  }
 
   // 4. Load Critique strictly for { missionId, taskId }
-  const critiqueDoc = await Critique.findOne({
+  let critiqueDoc = await Critique.findOne({
     missionId: missionObjectId,
     taskId: taskObjectId,
   }).lean();
 
+  if (!critiqueDoc) {
+    critiqueDoc = await Critique.findOne({
+      missionId: missionObjectId,
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+  }
+
   // 5. Load Evidence strictly for { missionId, taskId }
-  const evidenceDocs = await Evidence.find({
+  let evidenceDocs = await Evidence.find({
     missionId: missionObjectId,
     taskId: taskObjectId,
   })
@@ -615,7 +835,34 @@ async function buildTaskArtifact({ missionId, taskId, options = {} }) {
     .limit(LIMITS.MAX_EVIDENCE_LOADED)
     .lean();
 
-  // 6. Build authorized Evidence map
+  if (!evidenceDocs || evidenceDocs.length === 0) {
+    evidenceDocs = await Evidence.find({
+      missionId: missionObjectId,
+    })
+      .sort({ createdAt: 1 })
+      .limit(LIMITS.MAX_EVIDENCE_LOADED)
+      .lean();
+  }
+
+  // 6. Evaluate Evidence Intelligence and rank evidence deterministically
+  const evidenceIntel = evaluateMissionEvidence(evidenceDocs, {
+    missionObjective: objective,
+    taskTitle: taskDoc.title,
+  });
+
+  if (evidenceIntel?.rankedEvidence && evidenceDocs.length > 1) {
+    const rankMap = new Map();
+    evidenceIntel.rankedEvidence.forEach((re, idx) => {
+      if (re.evidenceId) rankMap.set(re.evidenceId.toString(), idx);
+    });
+    evidenceDocs.sort((a, b) => {
+      const rA = rankMap.has(a._id.toString()) ? rankMap.get(a._id.toString()) : 999;
+      const rB = rankMap.has(b._id.toString()) ? rankMap.get(b._id.toString()) : 999;
+      return rA - rB;
+    });
+  }
+
+  // 6b. Build authorized Evidence map
   const validEvidenceMap = new Map();
   for (const ed of evidenceDocs) {
     validEvidenceMap.set(ed._id.toString(), ed);
@@ -707,6 +954,7 @@ Synthesize a complete deliverable artifact adhering strictly to the required sch
       critiqueDoc,
       evidenceDocs,
       validEvidenceMap,
+      evidenceIntel,
     });
     validatedArtifact = validateArtifactPayload(rawDeterministic, validEvidenceMap);
     buildMethod = 'deterministic';
@@ -726,6 +974,7 @@ Synthesize a complete deliverable artifact adhering strictly to the required sch
       limitations: validatedArtifact.limitations,
       unresolvedQuestions: validatedArtifact.unresolvedQuestions,
       sourceReferences: validatedArtifact.sourceReferences,
+      grounding: validatedArtifact.grounding,
       buildMethod,
     });
   } catch (dbErr) {

@@ -20,26 +20,90 @@ function getDeterministicTasks(objective) {
     throw new Error('Mission objective must be a non-empty string');
   }
 
+  const trimmed = objective.trim();
+
+  // Bounded browser task activation: only when explicit HTTP/HTTPS URL exists
+  const urlMatch = trimmed.match(/https?:\/\/[^\s"'<>)\]]+/i);
+  if (urlMatch) {
+    const targetUrl = urlMatch[0].trim();
+    return [
+      {
+        title: 'Analyze mission objective',
+        description: 'Break down the requested objective into actionable work.',
+        order: 1,
+        agentId: 'analyst',
+      },
+      {
+        title: 'Inspect target webpage',
+        description: `Navigate to ${targetUrl} and extract page content, structure, and metadata.`,
+        order: 2,
+        agentId: 'browser',
+        url: targetUrl,
+      },
+      {
+        title: 'Analyze collected information',
+        description: 'Analyze the gathered information against the mission objective.',
+        order: 3,
+        agentId: 'analyst',
+      },
+      {
+        title: 'Audit and validate analysis',
+        description: 'Evaluate whether analysis findings are substantiated by gathered evidence.',
+        order: 4,
+        agentId: 'critic',
+      },
+      {
+        title: 'Prepare mission output',
+        description: 'Prepare a structured result that addresses the original objective.',
+        order: 5,
+        agentId: 'builder',
+      },
+      {
+        title: 'Verify mission deliverables',
+        description: 'Perform independent quality assurance validation of the mission deliverable.',
+        order: 6,
+        agentId: 'qa',
+      },
+    ];
+  }
+
   return [
     {
       title: 'Analyze mission objective',
       description: 'Break down the requested objective into actionable work.',
       order: 1,
+      agentId: 'analyst',
     },
     {
       title: 'Gather required information',
-      description: 'Identify and collect the information required to complete the mission.',
+      description: `Identify and collect authoritative information regarding: ${trimmed.slice(0, 150)}`,
       order: 2,
+      agentId: 'research',
+      missionObjective: trimmed,
     },
     {
       title: 'Analyze collected information',
       description: 'Analyze the gathered information against the mission objective.',
       order: 3,
+      agentId: 'analyst',
+    },
+    {
+      title: 'Audit and validate analysis',
+      description: 'Evaluate whether analysis findings are substantiated by gathered evidence.',
+      order: 4,
+      agentId: 'critic',
     },
     {
       title: 'Prepare mission output',
       description: 'Prepare a structured result that addresses the original objective.',
-      order: 4,
+      order: 5,
+      agentId: 'builder',
+    },
+    {
+      title: 'Verify mission deliverables',
+      description: 'Perform independent quality assurance validation of the mission deliverable.',
+      order: 6,
+      agentId: 'qa',
     },
   ];
 }

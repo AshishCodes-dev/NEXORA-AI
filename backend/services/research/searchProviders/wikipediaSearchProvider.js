@@ -17,18 +17,24 @@ class WikipediaSearchProvider extends BaseSearchProvider {
     }
 
     const limit = options.limit || 5;
-    const timeoutMs = options.timeoutMs || 8000;
+    const timeoutMs = options.timeoutMs || 15000;
     const cleanQuery = query.trim();
 
-    // 1. Try OpenSearch
+    // 1. For multi-word queries, full-text search is much more relevant on Wikipedia
+    if (cleanQuery.includes(' ')) {
+      let results = await this._fullTextSearch(cleanQuery, limit, timeoutMs);
+      if (results.length > 0) {
+        return results;
+      }
+      return await this._openSearch(cleanQuery, limit, timeoutMs);
+    }
+
+    // 2. For single-word queries, try OpenSearch first
     let results = await this._openSearch(cleanQuery, limit, timeoutMs);
     if (results.length > 0) {
       return results;
     }
-
-    // 2. Fallback to full-text search
-    results = await this._fullTextSearch(cleanQuery, limit, timeoutMs);
-    return results;
+    return await this._fullTextSearch(cleanQuery, limit, timeoutMs);
   }
 
   async _openSearch(query, limit, timeoutMs) {

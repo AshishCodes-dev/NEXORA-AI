@@ -38,6 +38,7 @@ async function executeQATask(task, context = {}) {
     missionId,
     taskId,
     options: context.options || {},
+    missionObjective: context.missionObjective,
   });
 
   return result;

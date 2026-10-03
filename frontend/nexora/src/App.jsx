@@ -214,7 +214,8 @@ function Dashboard() {
         setResultLoading(false);
 
         // Stop polling on terminal auth or not-found errors
-        if (err.statusCode === 401 || err.statusCode === 404) {
+        const status = err?.status ?? err?.statusCode;
+        if (status === 401 || status === 404) {
           setIsPolling(false);
           return;
         }

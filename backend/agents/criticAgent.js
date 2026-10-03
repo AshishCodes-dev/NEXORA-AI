@@ -38,6 +38,7 @@ async function executeCriticTask(task, context = {}) {
   const result = await critiqueTaskAnalysis({
     missionId,
     taskId,
+    missionObjective: task.missionObjective || context.missionObjective || context.options?.missionObjective || null,
     options: context.options || {},
   });
 

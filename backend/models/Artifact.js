@@ -74,6 +74,17 @@ const artifactSchema = new mongoose.Schema(
           enum: ['high', 'medium', 'low'],
           required: true,
         },
+        groundingStatus: {
+          type: String,
+          enum: ['supported', 'partially_supported', 'unsupported'],
+          default: 'supported',
+        },
+        sourceUrls: [
+          {
+            type: String,
+            trim: true,
+          },
+        ],
       },
     ],
     limitations: [
@@ -107,6 +118,42 @@ const artifactSchema = new mongoose.Schema(
         },
       },
     ],
+    grounding: {
+      evidenceIds: [
+        {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'Evidence',
+        },
+      ],
+      sourceUrls: [
+        {
+          type: String,
+          trim: true,
+        },
+      ],
+      supportedClaimCount: {
+        type: Number,
+        default: 0,
+      },
+      partiallySupportedClaimCount: {
+        type: Number,
+        default: 0,
+      },
+      unsupportedClaimCount: {
+        type: Number,
+        default: 0,
+      },
+      coverageScore: {
+        type: Number,
+        default: 0,
+      },
+      warnings: [
+        {
+          type: String,
+          trim: true,
+        },
+      ],
+    },
     buildMethod: {
       type: String,
       enum: ['gemini', 'deterministic'],
