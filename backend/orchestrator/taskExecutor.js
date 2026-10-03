@@ -55,6 +55,47 @@ async function executeTaskWork(task, options = {}) {
   return agentResult;
 }
 
+const DEFAULT_TASK_TIMEOUT_MS = 120000;
+
+/**
+ * Wraps task execution with a strict deadline timer to prevent hanging operations.
+ * Supports task document or direct async work executor.
+ * 
+ * @param {import('mongoose').Document|Function} taskOrFn
+ * @param {object|number} [options={}]
+ * @returns {Promise<object>}
+ */
+async function executeTaskWorkWithTimeout(taskOrFn, options = {}) {
+  const timeoutMs = typeof options === 'number'
+    ? options
+    : (options.taskTimeoutMs || DEFAULT_TASK_TIMEOUT_MS);
+  const taskLabel = typeof taskOrFn === 'function'
+    ? (options.title || 'task')
+    : (taskOrFn?.title || taskOrFn?.order || 'task');
+
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(`Task execution timed out after ${timeoutMs}ms (${taskLabel})`);
+      err.code = 'TASK_TIMEOUT';
+      reject(err);
+    }, timeoutMs);
+  });
+
+  try {
+    const workPromise = typeof taskOrFn === 'function'
+      ? taskOrFn()
+      : executeTaskWork(taskOrFn, options);
+    const result = await Promise.race([
+      workPromise,
+      timeoutPromise,
+    ]);
+    return result;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Executes a single MissionTask through its formal lifecycle:
  * pending -> queued -> running -> completed (or running -> failed).
@@ -108,9 +149,9 @@ async function executeMissionTask(taskId, options = {}) {
     throw new Error(`Invalid state transition: cannot transition task ${taskId} from '${existing ? existing.status : 'unknown'}' to 'running'`);
   }
 
-  // 4. Execute deterministic task work
+  // 4. Execute deterministic task work with timeout protection
   try {
-    const agentResult = await executeTaskWork(runningTask, options);
+    const agentResult = await executeTaskWorkWithTimeout(runningTask, options);
 
     // 5a. Transition: running -> completed (recording executing agentId & executionMetadata)
     const existingMetadata = runningTask.executionMetadata && typeof runningTask.executionMetadata === 'object'
@@ -159,4 +200,6 @@ async function executeMissionTask(taskId, options = {}) {
 module.exports = {
   executeMissionTask,
   executeTaskWork,
+  executeTaskWorkWithTimeout,
+  DEFAULT_TASK_TIMEOUT_MS,
 };

@@ -76,8 +76,14 @@ async function executeMission(missionId, options = {}) {
 
   // 4. Execute tasks strictly sequentially (dynamic pending queue)
   const executedTasks = [];
+  const startTime = Date.now();
+  const maxMissionDurationMs = options.totalTimeoutMs || 300000; // 5 minutes default
   try {
     while (true) {
+      if (Date.now() - startTime > maxMissionDurationMs) {
+        throw new Error(`Mission execution exceeded maximum allowable duration of ${maxMissionDurationMs}ms`);
+      }
+
       const nextTask = await MissionTask.findOne({
         missionId,
         status: 'pending',

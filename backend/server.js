@@ -2,7 +2,10 @@ const path = require('path');
 const fs = require('fs');
 const express = require('express');
 const cookieParser = require('cookie-parser');
+const mongoose = require('mongoose');
 const connectDB = require('./config/db');
+const { validateAuthConfig } = require('./config/authConfig');
+const { notFoundHandler, centralErrorHandler } = require('./middleware/errorHandler');
 const missionsRouter = require('./routes/missions');
 const authRouter = require('./routes/authRoutes');
 
@@ -32,8 +35,8 @@ if (fs.existsSync(envPath)) {
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
-app.use(express.json());
+// Middleware with 100kb request body limit for production safety
+app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
 
 // CORS configuration restricted to development frontend origin
@@ -67,17 +70,86 @@ app.use('/api/missions', missionsRouter);
 // Authentication routes
 app.use('/api/auth', authRouter);
 
-// 2 & 3. Connect to MongoDB and start Express server only after successful DB connection
+// 404 handler for unknown routes
+app.use(notFoundHandler);
+
+// Central error handler
+app.use(centralErrorHandler);
+
+let serverInstance = null;
+let isShuttingDown = false;
+
+/**
+ * Graceful shutdown handler for HTTP server and database connections
+ * @param {string} signal
+ * @returns {Promise<void>}
+ */
+const gracefulShutdown = async (signal) => {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`[SHUTDOWN] Received ${signal}. Starting graceful shutdown...`);
+
+  // Failsafe timer (10s) in case graceful shutdown hangs
+  const forceTimer = setTimeout(() => {
+    console.error('[SHUTDOWN] Forceful shutdown initiated after timeout.');
+    if (process.env.NODE_ENV !== 'test') {
+      process.exit(1);
+    }
+  }, 10000);
+  if (forceTimer.unref) forceTimer.unref();
+
+  try {
+    if (serverInstance) {
+      await new Promise((resolve) => serverInstance.close(resolve));
+      console.log('[SHUTDOWN] HTTP server closed.');
+    }
+    if (mongoose.connection && mongoose.connection.readyState !== 0) {
+      await mongoose.connection.close(false);
+      console.log('[DATABASE] MongoDB connection closed.');
+    }
+    clearTimeout(forceTimer);
+    console.log('[SHUTDOWN] Graceful shutdown completed cleanly.');
+    if (process.env.NODE_ENV !== 'test') {
+      process.exit(0);
+    }
+  } catch (err) {
+    console.error(`[SHUTDOWN] Error during shutdown: ${err.message}`);
+    clearTimeout(forceTimer);
+    if (process.env.NODE_ENV !== 'test') {
+      process.exit(1);
+    }
+  }
+};
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[PROCESS] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('[PROCESS] Uncaught Exception:', error);
+  gracefulShutdown('uncaughtException');
+});
+
+// Connect to MongoDB and start Express server only after successful auth validation and DB connection
 async function startServer() {
   try {
+    validateAuthConfig();
     await connectDB();
-    app.listen(PORT, () => {
+    serverInstance = app.listen(PORT, () => {
       console.log(`NEXORA backend server is running on port ${PORT}`);
     });
+    return serverInstance;
   } catch (error) {
     console.error(`Failed to start NEXORA server: ${error.message}`);
     process.exit(1);
   }
 }
 
-startServer();
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = { app, startServer, gracefulShutdown };

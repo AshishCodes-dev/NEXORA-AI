@@ -31,6 +31,9 @@ const formatTask = (doc) => ({
   order: doc.order
 });
 
+const MIN_OBJECTIVE_LENGTH = 3;
+const MAX_OBJECTIVE_LENGTH = 2000;
+
 /**
  * POST /api/missions
  * Creates and persists a new mission belonging to the authenticated user,
@@ -55,6 +58,22 @@ router.post('/', async (req, res) => {
     return res.status(400).json({
       success: false,
       error: 'Mission objective cannot be empty'
+    });
+  }
+
+  // Validation: minimum length
+  if (trimmedObjective.length < MIN_OBJECTIVE_LENGTH) {
+    return res.status(400).json({
+      success: false,
+      error: `Mission objective must be at least ${MIN_OBJECTIVE_LENGTH} characters long`
+    });
+  }
+
+  // Validation: maximum length
+  if (trimmedObjective.length > MAX_OBJECTIVE_LENGTH) {
+    return res.status(400).json({
+      success: false,
+      error: `Mission objective exceeds maximum allowed length of ${MAX_OBJECTIVE_LENGTH} characters`
     });
   }
 

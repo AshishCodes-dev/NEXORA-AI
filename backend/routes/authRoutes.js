@@ -3,6 +3,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const authMiddleware = require('../middleware/authMiddleware');
+const { getJwtSecret, COOKIE_NAME, getCookieOptions } = require('../config/authConfig');
+const { authRateLimiter } = require('../middleware/rateLimiter');
 
 const router = express.Router();
 
@@ -12,27 +14,10 @@ const router = express.Router();
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
- * Authentication configuration and cookie helpers
- */
-const JWT_SECRET = process.env.JWT_SECRET || 'nexora_dev_jwt_secret_change_in_production';
-const COOKIE_NAME = 'nexora_token';
-
-const getCookieOptions = () => {
-  const isProduction = process.env.NODE_ENV === 'production';
-  return {
-    httpOnly: true,
-    secure: isProduction,
-    sameSite: isProduction ? 'strict' : 'lax',
-    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in milliseconds
-    path: '/'
-  };
-};
-
-/**
  * POST /api/auth/signup
  * Register a new local user with email and password
  */
-router.post('/signup', async (req, res) => {
+router.post('/signup', authRateLimiter, async (req, res) => {
   const { name, email, password } = req.body || {};
 
   // 1. Validate name
@@ -128,7 +113,7 @@ router.post('/signup', async (req, res) => {
  * POST /api/auth/login
  * Authenticate local user with email & password and issue secure HTTP-only cookie
  */
-router.post('/login', async (req, res) => {
+router.post('/login', authRateLimiter, async (req, res) => {
   const { email, password } = req.body || {};
 
   // 1. Validate email
@@ -192,7 +177,7 @@ router.post('/login', async (req, res) => {
         email: user.email,
         authProvider: user.authProvider
       },
-      JWT_SECRET,
+      getJwtSecret(),
       { expiresIn: '7d' }
     );
 

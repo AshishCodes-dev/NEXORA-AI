@@ -1,7 +1,5 @@
 const jwt = require('jsonwebtoken');
-
-const JWT_SECRET = process.env.JWT_SECRET || 'nexora_dev_jwt_secret_change_in_production';
-const COOKIE_NAME = 'nexora_token';
+const { getJwtSecret, COOKIE_NAME } = require('../config/authConfig');
 
 /**
  * Authentication Middleware
@@ -20,7 +18,7 @@ const authMiddleware = (req, res, next) => {
 
   // 2. Verify JWT signature and expiration
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, getJwtSecret());
 
     if (!decoded || !decoded.id) {
       return res.status(401).json({
