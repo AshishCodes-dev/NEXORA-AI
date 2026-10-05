@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const MissionTask = require('../models/MissionTask');
 const { executeTaskWithAgent } = require('../agents/agentExecutionGateway');
+const { recordTaskStart, recordTaskEnd, categorizeTaskError } = require('../services/telemetry/telemetryService');
 
 /**
  * Task Work Execution
@@ -150,8 +151,22 @@ async function executeMissionTask(taskId, options = {}) {
   }
 
   // 4. Execute deterministic task work with timeout protection
+  const taskStartTime = Date.now();
+  const attemptNum = options.attempt || 1;
+  recordTaskStart(runningTask.missionId, runningTask._id, {
+    agentId: runningTask.agentId,
+    attempt: attemptNum,
+  }).catch(() => {});
+
   try {
     const agentResult = await executeTaskWorkWithTimeout(runningTask, options);
+    const durationMs = Date.now() - taskStartTime;
+    recordTaskEnd(runningTask.missionId, runningTask._id, {
+      agentId: agentResult?.agentId || runningTask.agentId || null,
+      status: 'completed',
+      durationMs,
+      attempt: attemptNum,
+    }).catch(() => {});
 
     // 5a. Transition: running -> completed (recording executing agentId & executionMetadata)
     const existingMetadata = runningTask.executionMetadata && typeof runningTask.executionMetadata === 'object'
@@ -181,6 +196,16 @@ async function executeMissionTask(taskId, options = {}) {
     completedTask._agentResult = agentResult;
     return completedTask;
   } catch (workError) {
+    const durationMs = Date.now() - taskStartTime;
+    recordTaskEnd(runningTask.missionId, runningTask._id, {
+      agentId: runningTask.agentId || null,
+      status: 'failed',
+      durationMs,
+      attempt: attemptNum,
+      error: workError.message,
+      failureCategory: categorizeTaskError(workError),
+    }).catch(() => {});
+
     // 5b. Transition: running -> failed (recording error message)
     console.error(`[TASK EXECUTOR] Task ${taskId} failed:`, workError.message);
     await MissionTask.findOneAndUpdate(

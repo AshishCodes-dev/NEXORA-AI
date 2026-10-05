@@ -4,6 +4,35 @@ const MissionTask = require('../models/MissionTask');
 const { generatePlan, planMission } = require('./missionPlanner');
 const { createMissionTasks } = require('./taskManager');
 const { executeMissionTask } = require('./taskExecutor');
+const { recordStageTransition, computeMissionMetrics } = require('../services/telemetry/telemetryService');
+
+/**
+ * Maps a MissionTask to its authoritative lifecycle stage
+ * @param {object} task
+ * @returns {string} stage
+ */
+function mapTaskToStage(task) {
+  const agentId = task?.agentId || '';
+  if (agentId === 'research' || /\b(research|gather|search)\b/i.test(task?.title || '')) {
+    return 'research';
+  }
+  if (agentId === 'browser' || /\b(browser|extract|navigate|visit|dom)\b/i.test(task?.title || '')) {
+    return 'browser';
+  }
+  if (agentId === 'analyst' || /\b(analy|reasoning|evaluate)\b/i.test(task?.title || '')) {
+    return 'analysis';
+  }
+  if (agentId === 'critic' || /\b(critic|audit|review)\b/i.test(task?.title || '')) {
+    return 'critique';
+  }
+  if (agentId === 'builder' || /\b(build|artifact|deliverable|report)\b/i.test(task?.title || '')) {
+    return 'building';
+  }
+  if (agentId === 'qa' || /\b(qa|quality|test|assertions)\b/i.test(task?.title || '')) {
+    return 'qa';
+  }
+  return 'research';
+}
 
 /**
  * Creates the execution plan for a newly submitted mission.
@@ -20,18 +49,30 @@ async function createMissionExecutionPlan(mission, options = {}) {
     throw new Error('Valid mission document with _id and objective is required');
   }
 
-  // 2. Generate plan via missionPlanner (Gemini with deterministic fallback)
-  const planResult = await generatePlan(mission.objective, options);
+  recordStageTransition(mission._id, { stage: 'planning', status: 'started' }).catch(() => {});
 
-  // 3. Persist mission tasks
-  const tasks = await createMissionTasks(mission._id, planResult.tasks);
+  try {
+    // 2. Generate plan via missionPlanner (Gemini with deterministic fallback)
+    const planResult = await generatePlan(mission.objective, {
+      ...options,
+      missionId: mission._id,
+    });
 
-  // 4. Return execution plan
-  return {
-    mission,
-    tasks,
-    planSource: planResult.source,
-  };
+    // 3. Persist mission tasks
+    const tasks = await createMissionTasks(mission._id, planResult.tasks);
+
+    recordStageTransition(mission._id, { stage: 'planning', status: 'completed' }).catch(() => {});
+
+    // 4. Return execution plan
+    return {
+      mission,
+      tasks,
+      planSource: planResult.source,
+    };
+  } catch (planError) {
+    recordStageTransition(mission._id, { stage: 'planning', status: 'failed', metadata: { error: planError.message } }).catch(() => {});
+    throw planError;
+  }
 }
 
 /**
@@ -93,12 +134,16 @@ async function executeMission(missionId, options = {}) {
         break;
       }
 
+      const taskStage = mapTaskToStage(nextTask);
+      recordStageTransition(missionId, { stage: taskStage, status: 'started' }).catch(() => {});
+
       const taskOptions = {
         ...options,
         missionObjective: mission.objective,
       };
       const executed = await executeMissionTask(nextTask._id, taskOptions);
       executedTasks.push(executed);
+      recordStageTransition(missionId, { stage: taskStage, status: 'completed' }).catch(() => {});
 
       // Dynamic Research -> Browser handoff
       // If the completed task was a research task and discovered candidates,
@@ -128,6 +173,9 @@ async function executeMission(missionId, options = {}) {
     }
 
     // 5. Transition mission: running -> completed
+    await recordStageTransition(missionId, { stage: 'completed', status: 'completed' }).catch(() => {});
+    await computeMissionMetrics(missionId).catch(() => {});
+
     const completedMission = await Mission.findByIdAndUpdate(
       missionId,
       { $set: { status: 'completed' } },
@@ -141,6 +189,13 @@ async function executeMission(missionId, options = {}) {
     };
   } catch (executionError) {
     // 6. Transition mission: running -> failed on any task error
+    await recordStageTransition(missionId, {
+      stage: 'failed',
+      status: 'failed',
+      metadata: { error: executionError.message },
+    }).catch(() => {});
+    await computeMissionMetrics(missionId).catch(() => {});
+
     console.error(`[MISSION ORCHESTRATOR] Mission ${missionId} task execution failed:`, executionError.message);
     const failedMission = await Mission.findByIdAndUpdate(
       missionId,

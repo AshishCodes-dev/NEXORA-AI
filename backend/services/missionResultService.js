@@ -6,6 +6,7 @@ const Evidence = require('../models/Evidence');
 const Analysis = require('../models/Analysis');
 const Critique = require('../models/Critique');
 const QAReport = require('../models/QAReport');
+const { getMissionMetrics } = require('./telemetry/telemetryService');
 
 /**
  * Bounds and pagination limits to prevent unbounded response growth
@@ -760,7 +761,10 @@ async function getMissionResult(missionId, userId) {
     foreignEvidenceDetected,
   });
 
-  // 12. Assemble structured, secure, bounded response contract (read-only)
+  // 12. Load deterministic mission metrics (read-only)
+  const metrics = await getMissionMetrics(missionObjectId);
+
+  // 13. Assemble structured, secure, bounded response contract (read-only)
   return {
     success: true,
     mission: mapMission(mission),
@@ -772,6 +776,7 @@ async function getMissionResult(missionId, userId) {
     analysis: mapAnalysis(analysisDocs),
     critique: mapCritique(critiqueDocs),
     qa: mapQA(qaReportDoc),
+    metrics: metrics || null,
   };
 }
 

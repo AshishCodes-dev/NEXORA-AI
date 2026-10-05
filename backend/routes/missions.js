@@ -1,8 +1,10 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const Mission = require('../models/Mission');
 const authMiddleware = require('../middleware/authMiddleware');
 const { createMissionExecutionPlan, executeMission } = require('../orchestrator/missionOrchestrator');
 const { getMissionResult } = require('../services/missionResultService');
+const { recordMissionCreated, getMissionTelemetry, getMissionMetrics } = require('../services/telemetry/telemetryService');
 
 const router = express.Router();
 
@@ -85,6 +87,8 @@ router.post('/', async (req, res) => {
       userId: req.user.id
     });
 
+    recordMissionCreated({ missionId: mission._id, userId: mission.userId }).catch(() => {});
+
     let executionPlan;
     try {
       executionPlan = await createMissionExecutionPlan(mission);
@@ -166,6 +170,78 @@ router.get('/:missionId/result', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: 'Failed to retrieve mission result'
+    });
+  }
+});
+
+/**
+ * GET /api/missions/:missionId/telemetry
+ * Retrieves lifecycle events, task timings, and provider metrics for the mission
+ */
+router.get('/:missionId/telemetry', async (req, res) => {
+  try {
+    const { missionId } = req.params;
+    if (!missionId || !mongoose.Types.ObjectId.isValid(missionId)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    const mission = await Mission.findOne({ _id: missionId, userId: req.user.id });
+    if (!mission) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    const telemetry = await getMissionTelemetry(missionId);
+    return res.status(200).json({
+      success: true,
+      telemetry: telemetry || null
+    });
+  } catch (error) {
+    console.error('[MISSION TELEMETRY ROUTE ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve mission telemetry'
+    });
+  }
+});
+
+/**
+ * GET /api/missions/:missionId/metrics
+ * Retrieves deterministic execution metrics for the mission
+ */
+router.get('/:missionId/metrics', async (req, res) => {
+  try {
+    const { missionId } = req.params;
+    if (!missionId || !mongoose.Types.ObjectId.isValid(missionId)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    const mission = await Mission.findOne({ _id: missionId, userId: req.user.id });
+    if (!mission) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    const metrics = await getMissionMetrics(missionId);
+    return res.status(200).json({
+      success: true,
+      metrics: metrics || null
+    });
+  } catch (error) {
+    console.error('[MISSION METRICS ROUTE ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve mission metrics'
     });
   }
 });

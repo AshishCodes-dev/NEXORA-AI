@@ -1,4 +1,5 @@
 const { GoogleGenAI } = require('@google/genai');
+const { recordProviderCall } = require('./telemetry/telemetryService');
 
 /**
  * Target Gemini model for structured task decomposition
@@ -170,6 +171,7 @@ async function generateMissionPlan(objective, options = {}) {
   const promptContent = `User mission:\n\n${trimmedObjective}`;
 
   let response;
+  const callStartTime = Date.now();
   try {
     response = await ai.models.generateContent({
       model: modelName,
@@ -181,7 +183,27 @@ async function generateMissionPlan(objective, options = {}) {
         temperature: 0.2, // Low temperature for deterministic, structured decomposition
       },
     });
+    recordProviderCall({
+      missionId: options.missionId,
+      taskId: options.taskId,
+      provider: 'gemini',
+      model: modelName,
+      operation: 'generateMissionPlan',
+      latencyMs: Date.now() - callStartTime,
+      success: true,
+    }).catch(() => {});
   } catch (apiError) {
+    recordProviderCall({
+      missionId: options.missionId,
+      taskId: options.taskId,
+      provider: 'gemini',
+      model: modelName,
+      operation: 'generateMissionPlan',
+      latencyMs: Date.now() - callStartTime,
+      success: false,
+      error: apiError.message,
+    }).catch(() => {});
+
     // Sanitize error logging to ensure API keys are never leaked in error logs or thrown exceptions
     const rawMsg = apiError.message || String(apiError);
     const sanitizedMsg = rawMsg.replace(/AIzaSy[A-Za-z0-9_-]{33}/g, '[REDACTED_API_KEY]');
@@ -223,10 +245,50 @@ async function generateMissionPlan(objective, options = {}) {
   return validatedPlan;
 }
 
+/**
+ * Instrumented helper for executing generateContent calls with automated provider telemetry
+ *
+ * @param {GoogleGenAI} ai - GoogleGenAI client instance
+ * @param {object} params - Request options passed to ai.models.generateContent
+ * @param {object} [context={}] - Telemetry context ({ missionId, taskId, operation })
+ * @returns {Promise<object>} The model response
+ */
+async function executeGenerateContent(ai, params, context = {}) {
+  const callStartTime = Date.now();
+  const modelName = params.model || DEFAULT_MODEL;
+  const operation = context.operation || 'generateContent';
+  try {
+    const response = await ai.models.generateContent(params);
+    await recordProviderCall({
+      missionId: context.missionId,
+      taskId: context.taskId,
+      provider: 'gemini',
+      model: modelName,
+      operation,
+      latencyMs: Date.now() - callStartTime,
+      success: true,
+    });
+    return response;
+  } catch (apiError) {
+    await recordProviderCall({
+      missionId: context.missionId,
+      taskId: context.taskId,
+      provider: 'gemini',
+      model: modelName,
+      operation,
+      latencyMs: Date.now() - callStartTime,
+      success: false,
+      error: apiError.message,
+    });
+    throw apiError;
+  }
+}
+
 module.exports = {
   generateMissionPlan,
   validateMissionPlan,
   getGeminiClient,
+  executeGenerateContent,
   MISSION_PLAN_SCHEMA,
   DEFAULT_MODEL,
 };

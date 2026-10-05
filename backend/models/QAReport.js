@@ -26,6 +26,11 @@ const qaReportSchema = new mongoose.Schema(
       enum: ['pass', 'needs_revision', 'fail'],
       required: true,
     },
+    overallScore: {
+      type: Number,
+      min: 0,
+      max: 100,
+    },
     summary: {
       type: String,
       required: true,
