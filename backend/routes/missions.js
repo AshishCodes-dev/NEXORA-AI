@@ -5,6 +5,7 @@ const authMiddleware = require('../middleware/authMiddleware');
 const { createMissionExecutionPlan, executeMission } = require('../orchestrator/missionOrchestrator');
 const { getMissionResult } = require('../services/missionResultService');
 const { getMissionState } = require('../services/missionStateService');
+const { getMissionEvents, recordEvent, EVENT_TYPES } = require('../services/missionEventService');
 const { recordMissionCreated, getMissionTelemetry, getMissionMetrics } = require('../services/telemetry/telemetryService');
 
 const router = express.Router();
@@ -89,6 +90,18 @@ router.post('/', async (req, res) => {
     });
 
     recordMissionCreated({ missionId: mission._id, userId: mission.userId }).catch(() => {});
+    recordEvent({
+      missionId: mission._id,
+      userId: mission.userId,
+      type: EVENT_TYPES.MISSION_CREATED,
+      action: 'Mission directive received and persisted',
+    }).catch(() => {});
+    recordEvent({
+      missionId: mission._id,
+      userId: mission.userId,
+      type: EVENT_TYPES.MISSION_PLANNING_STARTED,
+      action: 'Generating mission execution plan',
+    }).catch(() => {});
 
     let executionPlan;
     try {
@@ -270,6 +283,35 @@ router.get('/:missionId/state', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: 'Failed to retrieve mission state'
+    });
+  }
+});
+
+/**
+ * GET /api/missions/:missionId/events
+ * Retrieves immutable historical events and decisions for a mission owned by the authenticated user.
+ */
+router.get('/:missionId/events', async (req, res) => {
+  try {
+    const { missionId } = req.params;
+    const { limit, skip, type, decisionType } = req.query;
+
+    // req.user.id is guaranteed by authMiddleware; query/body params are strictly ignored
+    const result = await getMissionEvents(missionId, req.user.id, { limit, skip, type, decisionType });
+
+    if (result.notFound) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error('[MISSION EVENTS ROUTE ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve mission events'
     });
   }
 });

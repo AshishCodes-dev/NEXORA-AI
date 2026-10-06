@@ -164,6 +164,26 @@ async function persistBrowserEvidence({
 
   // 6. Insert fresh Evidence
   const createdEvidence = await Evidence.insertMany(evidenceDocs);
+
+  try {
+    const { recordDecision, DECISION_TYPES } = require('../missionEventService');
+    await recordDecision({
+      missionId: missionObjectId,
+      decisionType: DECISION_TYPES.ACCEPT_EVIDENCE,
+      taskId: taskObjectId,
+      reason: `Verified ${createdEvidence.length} evidence passages from ${verifiedUrl}`,
+      evidenceRefs: createdEvidence.map((e) => e._id.toString()),
+      action: `Persisted ${createdEvidence.length} grounded evidence passages`,
+      outcome: 'accepted',
+      metadata: {
+        evidenceCount: createdEvidence.length,
+        sourceUrl: verifiedUrl,
+      },
+    });
+  } catch {
+    // Non-blocking enrichment
+  }
+
   return createdEvidence;
 }
 

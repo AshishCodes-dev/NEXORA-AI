@@ -155,6 +155,20 @@ async function validateAndSelectCandidates(candidates, options = {}) {
     const syncCheck = checkUrlSynchronous(canonicalUrl);
     if (!syncCheck.isAllowed) {
       console.warn(`[BROWSER HANDOFF] Candidate URL '${canonicalUrl}' failed sync policy: ${syncCheck.reason}`);
+      if (options.missionId) {
+        try {
+          const { recordDecision, DECISION_TYPES } = require('../missionEventService');
+          await recordDecision({
+            missionId: options.missionId,
+            decisionType: DECISION_TYPES.REJECT_EVIDENCE,
+            taskId: options.researchTaskId,
+            reason: `Synchronous policy rejected candidate source: ${syncCheck.reason}`,
+            evidenceRefs: [canonicalUrl],
+            action: 'Rejected candidate URL from browser handoff',
+            outcome: 'rejected',
+          });
+        } catch {}
+      }
       continue;
     }
 
@@ -163,6 +177,20 @@ async function validateAndSelectCandidates(candidates, options = {}) {
       const policyCheck = await validateBrowserUrl(canonicalUrl);
       if (!policyCheck.isValid) {
         console.warn(`[BROWSER HANDOFF] Candidate URL '${canonicalUrl}' failed security check: ${policyCheck.reason}`);
+        if (options.missionId) {
+          try {
+            const { recordDecision, DECISION_TYPES } = require('../missionEventService');
+            await recordDecision({
+              missionId: options.missionId,
+              decisionType: DECISION_TYPES.REJECT_EVIDENCE,
+              taskId: options.researchTaskId,
+              reason: `Security check rejected candidate source: ${policyCheck.reason}`,
+              evidenceRefs: [canonicalUrl],
+              action: 'Rejected candidate URL from browser handoff',
+              outcome: 'rejected',
+            });
+          } catch {}
+        }
         continue;
       }
     } catch (valErr) {
@@ -340,6 +368,54 @@ async function createBrowserTasksFromResearch({
 
   // 6. Persist new dynamic browser tasks
   const createdTasks = await MissionTask.insertMany(newTasksData);
+
+  // Record decisions and events for dynamic browser handoff (non-blocking historical enrichment)
+  try {
+    const { recordDecision, recordEvent, DECISION_TYPES, EVENT_TYPES } = require('../missionEventService');
+    const selectedUrls = selectedCandidates.map((c) => c.url);
+    const avgQuality = selectedCandidates.reduce((acc, c) => acc + (c.qualityScore || 0), 0) / (selectedCandidates.length || 1);
+
+    await recordDecision({
+      missionId: missionObjectId,
+      decisionType: DECISION_TYPES.SELECT_SOURCE,
+      taskId: researchTaskObjectId,
+      reason: `Selected top ${selectedCandidates.length} candidate sources based on authority, relevance, and domain heuristics`,
+      evidenceRefs: selectedUrls,
+      confidence: Number(avgQuality.toFixed(2)),
+      action: `Selected ${selectedCandidates.length} sources for browser verification`,
+      outcome: 'selected',
+      metadata: {
+        candidateCount: candidates.length,
+        selectedCount: selectedCandidates.length,
+      },
+    }).catch(() => {});
+
+    await recordDecision({
+      missionId: missionObjectId,
+      decisionType: DECISION_TYPES.ADD_BROWSER_TASK,
+      taskId: researchTaskObjectId,
+      reason: `Triggered dynamic browser handoff to inspect and extract verified evidence from ${selectedCandidates.length} sources`,
+      evidenceRefs: selectedUrls,
+      action: `Inserted ${createdTasks.length} dynamic browser tasks into pipeline`,
+      outcome: 'tasks_created',
+      metadata: {
+        taskCount: createdTasks.length,
+      },
+    }).catch(() => {});
+
+    await recordEvent({
+      missionId: missionObjectId,
+      type: EVENT_TYPES.TASK_ADDED,
+      taskId: researchTaskObjectId,
+      action: `Added ${createdTasks.length} dynamic browser tasks`,
+      metadata: {
+        count: createdTasks.length,
+        source: 'browser_handoff',
+      },
+    }).catch(() => {});
+  } catch {
+    // Non-blocking enrichment
+  }
 
   return {
     tasksCreated: createdTasks,

@@ -5,6 +5,7 @@ const { generatePlan, planMission } = require('./missionPlanner');
 const { createMissionTasks } = require('./taskManager');
 const { executeMissionTask } = require('./taskExecutor');
 const { recordStageTransition, computeMissionMetrics } = require('../services/telemetry/telemetryService');
+const { recordEvent, recordDecision, EVENT_TYPES, DECISION_TYPES } = require('../services/missionEventService');
 
 /**
  * Maps a MissionTask to its authoritative lifecycle stage
@@ -72,6 +73,13 @@ async function createMissionExecutionPlan(mission, options = {}) {
     const tasks = await createMissionTasks(mission._id, planResult.tasks);
 
     recordStageTransition(mission._id, { stage: 'planning', status: 'completed' }).catch(() => {});
+    recordEvent({
+      missionId: mission._id,
+      userId: mission.userId,
+      type: EVENT_TYPES.TASK_ADDED,
+      action: `Created initial planned execution tasks (${tasks.length})`,
+      metadata: { count: tasks.length },
+    }).catch(() => {});
 
     // 4. Return execution plan
     return {
@@ -185,6 +193,13 @@ async function executeMission(missionId, options = {}) {
     // 5. Transition mission: running -> completed
     await recordStageTransition(missionId, { stage: 'completed', status: 'completed' }).catch(() => {});
     await computeMissionMetrics(missionId).catch(() => {});
+    await recordEvent({
+      missionId,
+      userId: mission.userId,
+      type: EVENT_TYPES.MISSION_COMPLETED,
+      action: 'Mission completed all tasks successfully',
+      outcome: 'completed',
+    }).catch(() => {});
 
     const completedMission = await Mission.findByIdAndUpdate(
       missionId,
@@ -205,6 +220,21 @@ async function executeMission(missionId, options = {}) {
       metadata: { error: executionError.message },
     }).catch(() => {});
     await computeMissionMetrics(missionId).catch(() => {});
+
+    await recordDecision({
+      missionId,
+      decisionType: DECISION_TYPES.BLOCK_MISSION,
+      reason: executionError.message,
+      action: 'Halt mission execution pipeline',
+      outcome: 'failed',
+    }).catch(() => {});
+    await recordEvent({
+      missionId,
+      type: EVENT_TYPES.MISSION_FAILED,
+      reason: executionError.message,
+      action: 'Mark mission status as failed',
+      outcome: 'failed',
+    }).catch(() => {});
 
     console.error(`[MISSION ORCHESTRATOR] Mission ${missionId} task execution failed:`, executionError.message);
     const failedMission = await Mission.findByIdAndUpdate(
