@@ -4,6 +4,7 @@ const Mission = require('../models/Mission');
 const authMiddleware = require('../middleware/authMiddleware');
 const { createMissionExecutionPlan, executeMission } = require('../orchestrator/missionOrchestrator');
 const { getMissionResult } = require('../services/missionResultService');
+const { getMissionState } = require('../services/missionStateService');
 const { recordMissionCreated, getMissionTelemetry, getMissionMetrics } = require('../services/telemetry/telemetryService');
 
 const router = express.Router();
@@ -242,6 +243,33 @@ router.get('/:missionId/metrics', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: 'Failed to retrieve mission metrics'
+    });
+  }
+});
+
+/**
+ * GET /api/missions/:missionId/state
+ * Retrieves authoritative real-time Mission State Intelligence
+ */
+router.get('/:missionId/state', async (req, res) => {
+  try {
+    const { missionId } = req.params;
+    // req.user.id is guaranteed by authMiddleware; query/body params are strictly ignored
+    const result = await getMissionState(missionId, req.user.id);
+
+    if (result.notFound) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error('[MISSION STATE ROUTE ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve mission state'
     });
   }
 });

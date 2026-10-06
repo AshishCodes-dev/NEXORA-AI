@@ -12,24 +12,34 @@ const { recordStageTransition, computeMissionMetrics } = require('../services/te
  * @returns {string} stage
  */
 function mapTaskToStage(task) {
-  const agentId = task?.agentId || '';
-  if (agentId === 'research' || /\b(research|gather|search)\b/i.test(task?.title || '')) {
-    return 'research';
-  }
-  if (agentId === 'browser' || /\b(browser|extract|navigate|visit|dom)\b/i.test(task?.title || '')) {
+  if (!task) return 'research';
+  const agentId = (task.agentId || '').toLowerCase();
+
+  if (agentId === 'browser') return 'browser';
+  if (agentId === 'research') return 'research';
+  if (agentId === 'analyst') return 'analysis';
+  if (agentId === 'critic') return 'critique';
+  if (agentId === 'builder') return 'building';
+  if (agentId === 'qa') return 'qa';
+
+  const text = `${task.title || ''} ${task.description || ''}`.toLowerCase();
+  if (/\b(browser|extract|navigate|visit|dom)\b/i.test(text)) {
     return 'browser';
   }
-  if (agentId === 'analyst' || /\b(analy|reasoning|evaluate)\b/i.test(task?.title || '')) {
+  if (/\b(research|gather|search)\b/i.test(text)) {
+    return 'research';
+  }
+  if (/\b(analy|reasoning|evaluate)\b/i.test(text)) {
     return 'analysis';
   }
-  if (agentId === 'critic' || /\b(critic|audit|review)\b/i.test(task?.title || '')) {
+  if (/\b(critic|audit|review)\b/i.test(text)) {
     return 'critique';
   }
-  if (agentId === 'builder' || /\b(build|artifact|deliverable|report)\b/i.test(task?.title || '')) {
-    return 'building';
-  }
-  if (agentId === 'qa' || /\b(qa|quality|test|assertions)\b/i.test(task?.title || '')) {
+  if (/\b(qa|quality|test|assertions)\b/i.test(text)) {
     return 'qa';
+  }
+  if (/\b(build|artifact|deliverable|report)\b/i.test(text)) {
+    return 'building';
   }
   return 'research';
 }
