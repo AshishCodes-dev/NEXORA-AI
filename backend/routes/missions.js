@@ -316,4 +316,39 @@ router.get('/:missionId/events', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/missions/:missionId/memory
+ * Retrieves bounded active memories for a mission owned by the authenticated user.
+ */
+router.get('/:missionId/memory', async (req, res) => {
+  try {
+    const { missionId } = req.params;
+    const { type, tags, query, limit, includeStale } = req.query;
+
+    const { getMissionMemories } = require('../services/missionMemoryService');
+    const result = await getMissionMemories(missionId, req.user.id, {
+      type,
+      tags: tags ? (Array.isArray(tags) ? tags : String(tags).split(',')) : [],
+      query,
+      limit,
+      includeStale,
+    });
+
+    if (result.notFound) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found',
+      });
+    }
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error('[MISSION MEMORY ROUTE ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve mission memories',
+    });
+  }
+});
+
 module.exports = router;

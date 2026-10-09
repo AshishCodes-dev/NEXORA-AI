@@ -41,10 +41,32 @@ async function executeTaskWork(task, options = {}) {
     }
   }
 
+  // Load advisory prior memory context (Step 8G.4)
+  let advisoryMemory = null;
+  if (task.missionId) {
+    try {
+      const { assembleTaskContext } = require('../services/missionMemoryService');
+      const Mission = require('../models/Mission');
+      const missionDoc = await Mission.findById(task.missionId).select('userId').lean();
+      if (missionDoc?.userId) {
+        advisoryMemory = await assembleTaskContext({
+          missionId: task.missionId,
+          userId: missionDoc.userId,
+          taskId: task._id,
+          currentTaskOrder: task.order,
+          targetAgentId: task.agentId,
+        });
+      }
+    } catch {
+      // Safe non-blocking fallback
+    }
+  }
+
   // Dispatch task to specialized agent through the Agent Execution Gateway
   const context = {
     options,
     missionObjective,
+    advisoryMemory,
   };
   const agentResult = await executeTaskWithAgent(task, context);
   if (agentResult && agentResult.status === 'failed') {
@@ -160,6 +182,11 @@ async function executeMissionTask(taskId, options = {}) {
   }).catch(() => {});
 
   if (attemptNum > 1) {
+    try {
+      const { supersedePriorTaskAttempts } = require('../services/missionMemoryService');
+      supersedePriorTaskAttempts(runningTask.missionId, runningTask._id, attemptNum).catch(() => {});
+    } catch {}
+
     if (!runningTask.executionMetadata?.isAdaptiveRetry) {
       await recordDecision({
         missionId: runningTask.missionId,
@@ -305,6 +332,33 @@ async function executeMissionTask(taskId, options = {}) {
       }
     }
 
+    // 5c. Record task memory entry (Step 8G.4)
+    try {
+      const { recordMemory, MEMORY_TYPES } = require('../services/missionMemoryService');
+      const Mission = require('../models/Mission');
+      const missionDoc = await Mission.findById(runningTask.missionId).select('userId').lean();
+      if (missionDoc?.userId) {
+        let memType = MEMORY_TYPES.TASK_OUTCOME;
+        let content = `Completed task "${runningTask.title}" (${executingAgentId || 'agent'}) on attempt ${attemptNum}.`;
+        if (executingAgentId === 'analyst' || executingAgentId === 'critic') {
+          memType = MEMORY_TYPES.SYNTHESIS_INSIGHT;
+          content = agentResult?.data?.summary || agentResult?.message || content;
+        }
+        await recordMemory({
+          missionId: runningTask.missionId,
+          userId: missionDoc.userId,
+          taskId: runningTask._id,
+          attempt: attemptNum,
+          type: memType,
+          key: `task_${runningTask.order}_${executingAgentId || 'outcome'}`,
+          content,
+          relevanceTags: [executingAgentId, `order_${runningTask.order}`].filter(Boolean),
+        }).catch(() => {});
+      }
+    } catch {
+      // Safe non-blocking memory recording
+    }
+
     return completedTask;
   } catch (workError) {
     const durationMs = Date.now() - taskStartTime;
@@ -330,6 +384,12 @@ async function executeMissionTask(taskId, options = {}) {
         durationMs,
       },
     }).catch(() => {});
+
+    // Invalidate active memories for failed task (Step 8G.4)
+    try {
+      const { invalidateTaskMemories } = require('../services/missionMemoryService');
+      invalidateTaskMemories(runningTask.missionId, taskId).catch(() => {});
+    } catch {}
 
     // 5b. Transition: running -> failed (recording error message)
     console.error(`[TASK EXECUTOR] Task ${taskId} failed:`, workError.message);
