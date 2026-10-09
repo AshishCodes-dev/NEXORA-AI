@@ -153,22 +153,24 @@ async function executeMissionTask(taskId, options = {}) {
 
   // 4. Execute deterministic task work with timeout protection
   const taskStartTime = Date.now();
-  const attemptNum = options.attempt || 1;
+  const attemptNum = options.attempt || runningTask.executionMetadata?.attempt || 1;
   recordTaskStart(runningTask.missionId, runningTask._id, {
     agentId: runningTask.agentId,
     attempt: attemptNum,
   }).catch(() => {});
 
   if (attemptNum > 1) {
-    await recordDecision({
-      missionId: runningTask.missionId,
-      decisionType: DECISION_TYPES.RETRY_TASK,
-      taskId: runningTask._id,
-      reason: `Retrying task execution under policy (attempt ${attemptNum})`,
-      action: `Execute task retry attempt ${attemptNum}`,
-      outcome: 'retrying',
-      metadata: { attempt: attemptNum },
-    }).catch(() => {});
+    if (!runningTask.executionMetadata?.isAdaptiveRetry) {
+      await recordDecision({
+        missionId: runningTask.missionId,
+        decisionType: DECISION_TYPES.RETRY_TASK,
+        taskId: runningTask._id,
+        reason: `Retrying task execution under policy (attempt ${attemptNum})`,
+        action: `Execute task retry attempt ${attemptNum}`,
+        outcome: 'retrying',
+        metadata: { attempt: attemptNum },
+      }).catch(() => {});
+    }
     await recordEvent({
       missionId: runningTask.missionId,
       type: EVENT_TYPES.TASK_RETRY_STARTED,
@@ -331,12 +333,18 @@ async function executeMissionTask(taskId, options = {}) {
 
     // 5b. Transition: running -> failed (recording error message)
     console.error(`[TASK EXECUTOR] Task ${taskId} failed:`, workError.message);
+    const existingMetadata = runningTask.executionMetadata && typeof runningTask.executionMetadata === 'object'
+      ? { ...runningTask.executionMetadata }
+      : {};
+    existingMetadata.attempt = attemptNum;
+
     await MissionTask.findOneAndUpdate(
       { _id: taskId, status: 'running' },
       {
         $set: {
           status: 'failed',
           error: workError.message,
+          executionMetadata: existingMetadata,
         },
       },
       { returnDocument: 'after' }

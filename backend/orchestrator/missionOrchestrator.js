@@ -157,36 +157,56 @@ async function executeMission(missionId, options = {}) {
 
       const taskOptions = {
         ...options,
+        attempt: nextTask.executionMetadata?.attempt || 1,
         missionObjective: mission.objective,
       };
-      const executed = await executeMissionTask(nextTask._id, taskOptions);
-      executedTasks.push(executed);
-      recordStageTransition(missionId, { stage: taskStage, status: 'completed' }).catch(() => {});
 
-      // Dynamic Research -> Browser handoff
-      // If the completed task was a research task and discovered candidates,
-      // create and insert bounded, verified Browser inspection tasks before downstream tasks.
+      let executed;
+      try {
+        executed = await executeMissionTask(nextTask._id, taskOptions);
+        executedTasks.push(executed);
+        recordStageTransition(missionId, { stage: taskStage, status: 'completed' }).catch(() => {});
+      } catch (taskError) {
+        // Adaptive Mission Loop: Evaluate task failure
+        const { evaluateTaskFailure } = require('../services/adaptiveMissionService');
+        const adaptiveDecision = await evaluateTaskFailure({
+          missionId,
+          taskId: nextTask._id,
+          error: taskError,
+          currentAttempt: nextTask.executionMetadata?.attempt || 1,
+          missionStartTime: startTime,
+          maxMissionDurationMs,
+          options,
+        }).catch((evalErr) => {
+          console.warn('[ADAPTIVE LOOP] Failure evaluation error:', evalErr.message);
+          return { action: 'BLOCK' };
+        });
+
+        if (adaptiveDecision.action === 'RETRY') {
+          // Re-queued as 'pending' for adaptive retry; continue orchestrator loop
+          continue;
+        }
+
+        taskError._blockDecisionRecorded = true;
+        throw taskError;
+      }
+
+      // Adaptive Mission Loop: Evaluate evidence sufficiency & expand if research task
       const isResearchTask = executed.agentId === 'research' ||
         /\b(research|gather|information)\b/i.test(executed.title || '');
 
       if (isResearchTask && options.skipBrowserHandoff !== true) {
-        const candidates = executed._agentResult?.data?.candidates ||
-          executed.executionMetadata?.resultData?.candidates || [];
-
-        if (Array.isArray(candidates) && candidates.length > 0) {
-          const { createBrowserTasksFromResearch } = require('../services/research/browserHandoffService');
-          await createBrowserTasksFromResearch({
-            missionId,
-            researchTaskId: executed._id,
-            candidates,
-            currentTaskOrder: executed.order,
-            options: {
-              ...options,
-              missionObjective: mission.objective,
-              taskTitle: executed.title,
-            },
-          });
-        }
+        const { evaluateEvidenceSufficiency } = require('../services/adaptiveMissionService');
+        await evaluateEvidenceSufficiency({
+          missionId,
+          taskId: executed._id,
+          executedResult: executed,
+          missionObjective: mission.objective,
+          currentTaskOrder: executed.order,
+          options,
+        }).catch((evalErr) => {
+          console.warn('[ADAPTIVE LOOP] Evidence sufficiency evaluation error:', evalErr.message);
+        });
       }
     }
 
@@ -221,13 +241,15 @@ async function executeMission(missionId, options = {}) {
     }).catch(() => {});
     await computeMissionMetrics(missionId).catch(() => {});
 
-    await recordDecision({
-      missionId,
-      decisionType: DECISION_TYPES.BLOCK_MISSION,
-      reason: executionError.message,
-      action: 'Halt mission execution pipeline',
-      outcome: 'failed',
-    }).catch(() => {});
+    if (!executionError._blockDecisionRecorded) {
+      await recordDecision({
+        missionId,
+        decisionType: DECISION_TYPES.BLOCK_MISSION,
+        reason: executionError.message,
+        action: 'Halt mission execution pipeline',
+        outcome: 'failed',
+      }).catch(() => {});
+    }
     await recordEvent({
       missionId,
       type: EVENT_TYPES.MISSION_FAILED,
