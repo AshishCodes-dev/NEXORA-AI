@@ -351,4 +351,39 @@ router.get('/:missionId/memory', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/missions/:missionId/graph
+ * Retrieves mission-scoped Evidence/Decision graph for the authenticated user.
+ */
+router.get('/:missionId/graph', async (req, res) => {
+  try {
+    const { missionId } = req.params;
+    const { includeAdvisory, includeEvents, maxNodes, maxEdges, depth } = req.query;
+
+    const { buildMissionGraph } = require('../services/missionGraphService');
+    const result = await buildMissionGraph(missionId, req.user.id, {
+      includeAdvisory,
+      includeEvents,
+      maxNodes,
+      maxEdges,
+      depth,
+    });
+
+    if (result.notFound) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found',
+      });
+    }
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error('[MISSION GRAPH ROUTE ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve mission graph',
+    });
+  }
+});
+
 module.exports = router;

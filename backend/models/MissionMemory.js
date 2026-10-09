@@ -78,9 +78,9 @@ function isSensitiveMetadataKey(key) {
   // Exact prototype pollution property names
   if (k === '__proto__' || k === 'constructor' || k === 'prototype') return true;
   // Exact sensitive credential names
-  if (/^(password|passwd|passphrase|secret|credentials?|cookie|cookies|jwt|bearer|authorization|auth|token)$/i.test(k)) return true;
+  if (/^(password|passwd|passphrase|secret|credentials?|cookie|cookies|jwt|bearer|authorization|auth|token|hash|session|sessionid)$/i.test(k)) return true;
   // Substrings for explicit password/secret/cookie/jwt/authorization credentials (excluding benign words like 'author')
-  if (/(password|passwd|passphrase|secret|cookie|jwt|authorization)/i.test(k) && !/(author)/i.test(k)) return true;
+  if (/(password|passwd|passphrase|secret|cookie|jwt|authorization|sessionid?)/i.test(k) && !/(author)/i.test(k)) return true;
   // Suffix/delimited matches for token and key credentials
   if (/(^|[_\-.])token($|[_\-.])/i.test(k)) return true;
   if (/(api|access|auth|bearer|session|refresh|id|private)[_\-.]?token$/i.test(k)) return true;
@@ -246,4 +246,5 @@ module.exports = {
   MEMORY_STATUSES,
   sanitizeMemoryString,
   sanitizeMemoryMetadata,
+  isSensitiveMetadataKey,
 };
