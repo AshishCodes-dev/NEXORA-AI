@@ -24,7 +24,22 @@ async function executeTaskWork(task, options = {}) {
   // Small deterministic processing delay for lifecycle state visibility
   const delayMs = options.taskDelayMs !== undefined ? options.taskDelayMs : 75;
   if (delayMs > 0) {
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (options.signal?.aborted) {
+      const abortErr = new Error('Task execution aborted');
+      abortErr.name = 'AbortError';
+      throw abortErr;
+    }
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, delayMs);
+      if (options.signal) {
+        options.signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          const abortErr = new Error('Task execution aborted');
+          abortErr.name = 'AbortError';
+          reject(abortErr);
+        }, { once: true });
+      }
+    });
   }
 
   // Resolve mission context (objective) if available
@@ -80,6 +95,22 @@ async function executeTaskWork(task, options = {}) {
 }
 
 const DEFAULT_TASK_TIMEOUT_MS = 120000;
+const HEARTBEAT_INTERVAL_MS = 5000;
+const LEASE_DURATION_MS = 25000;
+
+/**
+ * Worker execution lifecycle states
+ */
+const WORKER_STATES = Object.freeze({
+  RUNNING: 'RUNNING',
+  COMPLETING_DRAINING: 'COMPLETING_DRAINING',
+  COMPLETING_CAS: 'COMPLETING_CAS',
+  CONFIRMED_COMPLETED: 'CONFIRMED_COMPLETED',
+  FAILING_DRAINING: 'FAILING_DRAINING',
+  FAILING_CAS: 'FAILING_CAS',
+  CONFIRMED_FAILED: 'CONFIRMED_FAILED',
+  FENCED_LOST: 'FENCED_LOST',
+});
 
 /**
  * Wraps task execution with a strict deadline timer to prevent hanging operations.
@@ -136,15 +167,31 @@ class TaskClaimConflictError extends Error {
 }
 
 /**
+ * Typed error indicating that a worker lost its execution lease due to epoch fencing,
+ * lease expiration under uncertainty, or concurrent reclamation.
+ */
+class LeaseLostError extends Error {
+  constructor(taskId, generation, workerId, reason) {
+    super(`Task ${taskId} execution lease lost (generation: ${generation}, worker: ${workerId}, reason: ${reason})`);
+    this.name = 'LeaseLostError';
+    this.code = 'LEASE_LOST';
+    this.taskId = taskId ? taskId.toString() : null;
+    this.generation = generation;
+    this.workerId = workerId;
+    this.reason = reason;
+  }
+}
+
+/**
  * Executes a single MissionTask through its formal lifecycle:
  * pending -> running -> completed (or running -> failed).
  * 
  * MongoDB is updated atomically during task claim with generation increment.
- * Invalid transitions or jumps (e.g. pending -> completed) are rejected.
- * Concurrent claims yield a typed TaskClaimConflictError without failing the mission.
+ * Periodic heartbeats renew ownership with generation and workerId fencing.
+ * Terminal completion and failure CAS operations strictly fence against stale workers.
  * 
  * @param {mongoose.Types.ObjectId|string} taskId - The ID of the MissionTask to execute
- * @param {object} [options={}] - Execution options (e.g. testing delays/failures, workerId)
+ * @param {object} [options={}] - Execution options (e.g. testing delays/failures, workerId, test hooks)
  * @returns {Promise<import('mongoose').Document>} The updated MissionTask document
  */
 async function executeMissionTask(taskId, options = {}) {
@@ -171,6 +218,7 @@ async function executeMissionTask(taskId, options = {}) {
               {
                 claimedBy: workerId,
                 claimedAt: '$$NOW',
+                heartbeatAt: '$$NOW',
                 generation: {
                   $add: [
                     { $ifNull: ['$executionMetadata.generation', 0] },
@@ -200,9 +248,119 @@ async function executeMissionTask(taskId, options = {}) {
     });
   }
 
-  // 4. Execute deterministic task work with timeout protection
-  const taskStartTime = Date.now();
+  // 3. Worker Ownership & Heartbeat Loop Setup
+  const currentGeneration = runningTask.executionMetadata?.generation || 1;
   const attemptNum = options.attempt || runningTask.executionMetadata?.attempt || 1;
+  const heartbeatIntervalMs = options.__heartbeatIntervalMs !== undefined
+    ? options.__heartbeatIntervalMs
+    : HEARTBEAT_INTERVAL_MS;
+  const leaseDurationMs = options.__leaseDurationMs !== undefined
+    ? options.__leaseDurationMs
+    : LEASE_DURATION_MS;
+
+  let workerState = WORKER_STATES.RUNNING;
+  let leaseStatus = 'ACTIVE'; // 'ACTIVE' | 'LOST' | 'EXPIRED_UNCERTAIN'
+  let heartbeatTimer = null;
+  let activeHeartbeatPromise = null;
+  let lastSuccessfulHeartbeatAt = Date.now();
+  let consecutiveHeartbeatErrors = 0;
+  const abortController = new AbortController();
+
+  function handleHeartbeatError(err) {
+    consecutiveHeartbeatErrors++;
+    const elapsedSinceLastSuccess = Date.now() - lastSuccessfulHeartbeatAt;
+    if (elapsedSinceLastSuccess >= leaseDurationMs) {
+      leaseStatus = 'EXPIRED_UNCERTAIN';
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+      abortController.abort();
+    }
+  }
+
+  async function sendHeartbeat() {
+    if (workerState !== WORKER_STATES.RUNNING) {
+      return;
+    }
+
+    if (typeof options.__injectedHeartbeatError === 'function') {
+      const injectedErr = options.__injectedHeartbeatError();
+      if (injectedErr) {
+        handleHeartbeatError(injectedErr);
+        return;
+      }
+    }
+
+    try {
+      const updated = await MissionTask.findOneAndUpdate(
+        {
+          _id: taskId,
+          status: 'running',
+          'executionMetadata.generation': currentGeneration,
+          'executionMetadata.claimedBy': workerId,
+        },
+        {
+          $set: {
+            'executionMetadata.heartbeatAt': new Date(),
+          },
+        },
+        { returnDocument: 'after' }
+      );
+
+      if (!updated) {
+        // CAS returned null: lease lost / fenced by another worker or status changed
+        leaseStatus = 'LOST';
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+        abortController.abort();
+        return;
+      }
+
+      lastSuccessfulHeartbeatAt = Date.now();
+      consecutiveHeartbeatErrors = 0;
+      if (typeof options.__onHeartbeatSuccess === 'function') {
+        options.__onHeartbeatSuccess(updated);
+      }
+    } catch (err) {
+      handleHeartbeatError(err);
+    }
+  }
+
+  async function drainHeartbeat(targetDrainingState) {
+    workerState = targetDrainingState;
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+    if (activeHeartbeatPromise) {
+      try {
+        await activeHeartbeatPromise;
+      } catch {
+        // Ignored; errors handled inside sendHeartbeat
+      }
+      activeHeartbeatPromise = null;
+    }
+    if (leaseStatus === 'LOST' || leaseStatus === 'EXPIRED_UNCERTAIN') {
+      workerState = WORKER_STATES.FENCED_LOST;
+      throw new LeaseLostError(taskId, currentGeneration, workerId, leaseStatus);
+    }
+  }
+
+  if (heartbeatIntervalMs > 0) {
+    heartbeatTimer = setInterval(() => {
+      if (workerState !== WORKER_STATES.RUNNING) return;
+      if (activeHeartbeatPromise) return; // Avoid concurrent ticks
+      activeHeartbeatPromise = sendHeartbeat().finally(() => {
+        activeHeartbeatPromise = null;
+      });
+    }, heartbeatIntervalMs);
+  }
+
+  // 4. Execute deterministic task work with timeout & cancellation protection
+  const taskStartTime = Date.now();
   recordTaskStart(runningTask.missionId, runningTask._id, {
     agentId: runningTask.agentId,
     attempt: attemptNum,
@@ -243,39 +401,85 @@ async function executeMissionTask(taskId, options = {}) {
   }).catch(() => {});
 
   try {
-    const agentResult = await executeTaskWorkWithTimeout(runningTask, options);
+    const agentResult = await executeTaskWorkWithTimeout(runningTask, {
+      ...options,
+      signal: abortController.signal,
+    });
     const durationMs = Date.now() - taskStartTime;
+
+    // Check if worker was aborted or lease was lost while work was running
+    if (leaseStatus === 'LOST' || leaseStatus === 'EXPIRED_UNCERTAIN') {
+      workerState = WORKER_STATES.FENCED_LOST;
+      throw new LeaseLostError(taskId, currentGeneration, workerId, leaseStatus);
+    }
+
+    // Step 1: Pre-CAS Heartbeat Drain
+    await drainHeartbeat(WORKER_STATES.COMPLETING_DRAINING);
+
+    // Test hook: controlled barrier before completion CAS
+    if (typeof options.__barrierBeforeCompletion === 'function') {
+      await options.__barrierBeforeCompletion({
+        taskId,
+        generation: currentGeneration,
+        workerId,
+      });
+      if (leaseStatus === 'LOST' || leaseStatus === 'EXPIRED_UNCERTAIN') {
+        workerState = WORKER_STATES.FENCED_LOST;
+        throw new LeaseLostError(taskId, currentGeneration, workerId, leaseStatus);
+      }
+    }
+
+    // Step 2: Transition to COMPLETING_CAS
+    workerState = WORKER_STATES.COMPLETING_CAS;
+
+    // Test hook: injected completion CAS error for network ambiguity testing
+    if (options.__injectedCompletionCasError) {
+      throw options.__injectedCompletionCasError;
+    }
+
+    // Step 3: Atomic Completion CAS fenced by generation and workerId
+    let completedTask;
+    try {
+      completedTask = await MissionTask.findOneAndUpdate(
+        {
+          _id: taskId,
+          status: 'running',
+          'executionMetadata.generation': currentGeneration,
+          'executionMetadata.claimedBy': workerId,
+        },
+        {
+          $set: {
+            status: 'completed',
+            agentId: agentResult?.agentId || runningTask.agentId || null,
+            error: null,
+            'executionMetadata.resultData': agentResult?.data || null,
+            'executionMetadata.attempt': attemptNum,
+          },
+        },
+        { returnDocument: 'after' }
+      );
+    } catch (dbErr) {
+      // Thrown MongoDB / network error: Ambiguous DB outcome!
+      // Do NOT emit completion events or write memory.
+      // Do NOT execute failure CAS or emit failure events.
+      // Phase 2 recovery scanner will reconcile.
+      throw dbErr;
+    }
+
+    if (!completedTask) {
+      workerState = WORKER_STATES.FENCED_LOST;
+      throw new LeaseLostError(taskId, currentGeneration, workerId, 'COMPLETION_CAS_FENCED');
+    }
+
+    // Step 4: Confirmed completed!
+    workerState = WORKER_STATES.CONFIRMED_COMPLETED;
+
     recordTaskEnd(runningTask.missionId, runningTask._id, {
       agentId: agentResult?.agentId || runningTask.agentId || null,
       status: 'completed',
       durationMs,
       attempt: attemptNum,
     }).catch(() => {});
-
-    // 5a. Transition: running -> completed (recording executing agentId & executionMetadata)
-    const existingMetadata = runningTask.executionMetadata && typeof runningTask.executionMetadata === 'object'
-      ? runningTask.executionMetadata
-      : {};
-
-    const completedTask = await MissionTask.findOneAndUpdate(
-      { _id: taskId, status: 'running' },
-      {
-        $set: {
-          status: 'completed',
-          agentId: agentResult?.agentId || runningTask.agentId || null,
-          error: null,
-          executionMetadata: {
-            ...existingMetadata,
-            resultData: agentResult?.data || null,
-          },
-        },
-      },
-      { returnDocument: 'after' }
-    );
-
-    if (!completedTask) {
-      throw new Error(`Failed to mark task ${taskId} as completed (concurrent state change)`);
-    }
 
     completedTask._agentResult = agentResult;
 
@@ -359,7 +563,7 @@ async function executeMissionTask(taskId, options = {}) {
       }
     }
 
-    // 5c. Record task memory entry (Step 8G.4)
+    // Record task memory entry (Step 8G.4)
     try {
       const { recordMemory, MEMORY_TYPES } = require('../services/missionMemoryService');
       const Mission = require('../models/Mission');
@@ -388,7 +592,84 @@ async function executeMissionTask(taskId, options = {}) {
 
     return completedTask;
   } catch (workError) {
+    // 1. If error occurred in COMPLETING_CAS (network ambiguity or fenced CAS)
+    if (workerState === WORKER_STATES.COMPLETING_CAS) {
+      if (workError instanceof LeaseLostError) {
+        workerState = WORKER_STATES.FENCED_LOST;
+        throw workError;
+      }
+      // DB / network error during completion CAS: ambiguous outcome
+      // Do NOT execute failure CAS, do NOT emit failure events.
+      throw workError;
+    }
+
+    // 2. If lease was lost or expired uncertain
+    if (workError instanceof LeaseLostError || leaseStatus === 'LOST' || leaseStatus === 'EXPIRED_UNCERTAIN') {
+      workerState = WORKER_STATES.FENCED_LOST;
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+      throw (workError instanceof LeaseLostError
+        ? workError
+        : new LeaseLostError(taskId, currentGeneration, workerId, leaseStatus));
+    }
+
+    // 3. Normal work failure path:
     const durationMs = Date.now() - taskStartTime;
+
+    // Drain heartbeat before failure CAS
+    try {
+      await drainHeartbeat(WORKER_STATES.FAILING_DRAINING);
+    } catch (drainErr) {
+      if (drainErr instanceof LeaseLostError || leaseStatus === 'LOST' || leaseStatus === 'EXPIRED_UNCERTAIN') {
+        workerState = WORKER_STATES.FENCED_LOST;
+        throw (drainErr instanceof LeaseLostError
+          ? drainErr
+          : new LeaseLostError(taskId, currentGeneration, workerId, leaseStatus));
+      }
+    }
+
+    // Test hook: controlled barrier before failure CAS
+    if (typeof options.__barrierBeforeFailure === 'function') {
+      await options.__barrierBeforeFailure({
+        taskId,
+        generation: currentGeneration,
+        workerId,
+      });
+      if (leaseStatus === 'LOST' || leaseStatus === 'EXPIRED_UNCERTAIN') {
+        workerState = WORKER_STATES.FENCED_LOST;
+        throw new LeaseLostError(taskId, currentGeneration, workerId, leaseStatus);
+      }
+    }
+
+    workerState = WORKER_STATES.FAILING_CAS;
+    console.error(`[TASK EXECUTOR] Task ${taskId} failed:`, workError.message);
+
+    const failedTask = await MissionTask.findOneAndUpdate(
+      {
+        _id: taskId,
+        status: 'running',
+        'executionMetadata.generation': currentGeneration,
+        'executionMetadata.claimedBy': workerId,
+      },
+      {
+        $set: {
+          status: 'failed',
+          error: workError.message,
+          'executionMetadata.attempt': attemptNum,
+        },
+      },
+      { returnDocument: 'after' }
+    );
+
+    if (!failedTask) {
+      workerState = WORKER_STATES.FENCED_LOST;
+      throw new LeaseLostError(taskId, currentGeneration, workerId, 'FAILURE_CAS_FENCED');
+    }
+
+    workerState = WORKER_STATES.CONFIRMED_FAILED;
+
     recordTaskEnd(runningTask.missionId, runningTask._id, {
       agentId: runningTask.agentId || null,
       status: 'failed',
@@ -418,25 +699,12 @@ async function executeMissionTask(taskId, options = {}) {
       invalidateTaskMemories(runningTask.missionId, taskId).catch(() => {});
     } catch {}
 
-    // 5b. Transition: running -> failed (recording error message)
-    console.error(`[TASK EXECUTOR] Task ${taskId} failed:`, workError.message);
-    const existingMetadata = runningTask.executionMetadata && typeof runningTask.executionMetadata === 'object'
-      ? { ...runningTask.executionMetadata }
-      : {};
-    existingMetadata.attempt = attemptNum;
-
-    await MissionTask.findOneAndUpdate(
-      { _id: taskId, status: 'running' },
-      {
-        $set: {
-          status: 'failed',
-          error: workError.message,
-          executionMetadata: existingMetadata,
-        },
-      },
-      { returnDocument: 'after' }
-    );
     throw workError;
+  } finally {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
   }
 }
 
@@ -445,5 +713,9 @@ module.exports = {
   executeTaskWork,
   executeTaskWorkWithTimeout,
   TaskClaimConflictError,
+  LeaseLostError,
+  WORKER_STATES,
   DEFAULT_TASK_TIMEOUT_MS,
+  HEARTBEAT_INTERVAL_MS,
+  LEASE_DURATION_MS,
 };
