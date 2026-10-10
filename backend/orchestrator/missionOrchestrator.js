@@ -3,7 +3,7 @@ const Mission = require('../models/Mission');
 const MissionTask = require('../models/MissionTask');
 const { generatePlan, planMission } = require('./missionPlanner');
 const { createMissionTasks } = require('./taskManager');
-const { executeMissionTask } = require('./taskExecutor');
+const { executeMissionTask, TaskClaimConflictError } = require('./taskExecutor');
 const { recordStageTransition, computeMissionMetrics } = require('../services/telemetry/telemetryService');
 const { recordEvent, recordDecision, EVENT_TYPES, DECISION_TYPES } = require('../services/missionEventService');
 
@@ -111,7 +111,7 @@ async function executeMission(missionId, options = {}) {
   }
 
   // 2. Transition mission: planning/queued -> running (atomic guard against duplicate execution)
-  const mission = await Mission.findOneAndUpdate(
+  let mission = await Mission.findOneAndUpdate(
     { _id: missionId, status: { $in: ['planning', 'queued'] } },
     { $set: { status: 'running' } },
     { returnDocument: 'after' }
@@ -122,8 +122,12 @@ async function executeMission(missionId, options = {}) {
     if (!existing) {
       throw new Error(`Mission ${missionId} not found`);
     }
-    // Mission is already running, completed, or failed - exit safely without duplicating execution
-    return { mission: existing, alreadyRan: true };
+    // Mission is already completed or failed - exit safely without duplicating execution
+    if (existing.status === 'completed' || existing.status === 'failed') {
+      return { mission: existing, alreadyRan: true };
+    }
+    // Mission is already in 'running' state; orchestrator evaluates in-flight guard inside task loop
+    mission = existing;
   }
 
   // 3. Load associated tasks to verify initial presence
@@ -143,6 +147,24 @@ async function executeMission(missionId, options = {}) {
         throw new Error(`Mission execution exceeded maximum allowable duration of ${maxMissionDurationMs}ms`);
       }
 
+      // In-flight concurrency guard:
+      // If any task is currently running or queued, an active worker is already executing this step.
+      // Do not dispatch downstream pending tasks out-of-order!
+      const inFlightTask = await MissionTask.findOne({
+        missionId,
+        status: { $in: ['running', 'queued'] },
+      }).sort({ order: 1 });
+
+      if (inFlightTask) {
+        console.log(`[MISSION ORCHESTRATOR] Mission ${missionId} has in-flight task ${inFlightTask._id} (order ${inFlightTask.order}, status '${inFlightTask.status}'). Yielding loop cleanly.`);
+        return {
+          mission: await Mission.findById(missionId),
+          tasks: executedTasks,
+          alreadyActive: true,
+          activeTaskId: inFlightTask._id,
+        };
+      }
+
       const nextTask = await MissionTask.findOne({
         missionId,
         status: 'pending',
@@ -150,6 +172,29 @@ async function executeMission(missionId, options = {}) {
 
       if (!nextTask) {
         break;
+      }
+
+      // Finding 1 Fix: Ensure no earlier task with a lower order has failed status.
+      // A failed prerequisite halts the sequential pipeline; downstream tasks must never be dispatched.
+      const failedPriorTask = await MissionTask.findOne({
+        missionId,
+        order: { $lt: nextTask.order },
+        status: 'failed',
+      }).sort({ order: 1 });
+
+      if (failedPriorTask) {
+        console.log(`[MISSION ORCHESTRATOR] Mission ${missionId} cannot dispatch task ${nextTask._id} (order ${nextTask.order}): prior task ${failedPriorTask._id} (order ${failedPriorTask.order}) is in failed state.`);
+        const failedMission = await Mission.findOneAndUpdate(
+          { _id: missionId, status: 'running' },
+          { $set: { status: 'failed' } },
+          { returnDocument: 'after' }
+        ) || await Mission.findById(missionId);
+        return {
+          mission: failedMission,
+          tasks: executedTasks,
+          failed: true,
+          error: `Prerequisite task order ${failedPriorTask.order} (${failedPriorTask.title || 'task'}) failed; halting pipeline.`,
+        };
       }
 
       const taskStage = mapTaskToStage(nextTask);
@@ -167,6 +212,16 @@ async function executeMission(missionId, options = {}) {
         executedTasks.push(executed);
         recordStageTransition(missionId, { stage: taskStage, status: 'completed' }).catch(() => {});
       } catch (taskError) {
+        if (taskError.code === 'TASK_CLAIM_CONFLICT' || taskError instanceof TaskClaimConflictError) {
+          console.log(`[MISSION ORCHESTRATOR] Task ${nextTask._id} claim conflict encountered (${taskError.message}). Yielding loop cleanly.`);
+          return {
+            mission: await Mission.findById(missionId),
+            tasks: executedTasks,
+            claimConflict: true,
+            conflictTaskId: nextTask._id,
+          };
+        }
+
         // Adaptive Mission Loop: Evaluate task failure
         const { evaluateTaskFailure } = require('../services/adaptiveMissionService');
         const adaptiveDecision = await evaluateTaskFailure({
@@ -210,7 +265,44 @@ async function executeMission(missionId, options = {}) {
       }
     }
 
-    // 5. Transition mission: running -> completed
+    // Verify mission integrity before completion: cannot mark completed if any task failed
+    const failedTask = await MissionTask.findOne({ missionId, status: 'failed' });
+    if (failedTask) {
+      console.log(`[MISSION ORCHESTRATOR] Mission ${missionId} cannot complete: task ${failedTask._id} (order ${failedTask.order}) is in failed status.`);
+      const failedMission = await Mission.findOneAndUpdate(
+        { _id: missionId, status: 'running' },
+        { $set: { status: 'failed' } },
+        { returnDocument: 'after' }
+      ) || await Mission.findById(missionId);
+      return {
+        mission: failedMission,
+        tasks: executedTasks,
+        failed: true,
+        error: `Mission contains failed task order ${failedTask.order} (${failedTask.title || 'task'}); cannot mark completed.`,
+      };
+    }
+
+    // 5. Transition mission: running -> completed (atomic conditional update for idempotent terminal transition)
+    const completedMission = await Mission.findOneAndUpdate(
+      { _id: missionId, status: 'running' },
+      { $set: { status: 'completed' } },
+      { returnDocument: 'after' }
+    );
+
+    if (!completedMission) {
+      // Finding 2 Fix: Conditional update matched no document.
+      // Another concurrent worker or execution path already performed the terminal transition.
+      // Do not emit duplicate terminal events or stage transitions.
+      const currentMission = await Mission.findById(missionId);
+      return {
+        mission: currentMission,
+        tasks: executedTasks,
+        failed: currentMission?.status === 'failed',
+        alreadyRan: true,
+      };
+    }
+
+    // Only the single winning caller that successfully performed running -> completed emits terminal events
     await recordStageTransition(missionId, { stage: 'completed', status: 'completed' }).catch(() => {});
     await computeMissionMetrics(missionId).catch(() => {});
     await recordEvent({
@@ -220,12 +312,6 @@ async function executeMission(missionId, options = {}) {
       action: 'Mission completed all tasks successfully',
       outcome: 'completed',
     }).catch(() => {});
-
-    const completedMission = await Mission.findByIdAndUpdate(
-      missionId,
-      { $set: { status: 'completed' } },
-      { returnDocument: 'after' }
-    );
 
     return {
       mission: completedMission,
@@ -259,11 +345,11 @@ async function executeMission(missionId, options = {}) {
     }).catch(() => {});
 
     console.error(`[MISSION ORCHESTRATOR] Mission ${missionId} task execution failed:`, executionError.message);
-    const failedMission = await Mission.findByIdAndUpdate(
-      missionId,
+    const failedMission = await Mission.findOneAndUpdate(
+      { _id: missionId, status: 'running' },
       { $set: { status: 'failed' } },
       { returnDocument: 'after' }
-    );
+    ) || await Mission.findById(missionId);
 
     return {
       mission: failedMission,

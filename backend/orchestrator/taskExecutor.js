@@ -121,56 +121,83 @@ async function executeTaskWorkWithTimeout(taskOrFn, options = {}) {
 }
 
 /**
+ * Typed error indicating that a task claim could not be acquired due to concurrent execution
+ * or non-pending task status.
+ */
+class TaskClaimConflictError extends Error {
+  constructor(taskId, currentStatus, details = {}) {
+    super(`Cannot execute task ${taskId}: task is currently in '${currentStatus}' state (conflict: unavailable for claim)`);
+    this.name = 'TaskClaimConflictError';
+    this.code = 'TASK_CLAIM_CONFLICT';
+    this.taskId = taskId ? taskId.toString() : null;
+    this.currentStatus = currentStatus;
+    this.details = details;
+  }
+}
+
+/**
  * Executes a single MissionTask through its formal lifecycle:
- * pending -> queued -> running -> completed (or running -> failed).
+ * pending -> running -> completed (or running -> failed).
  * 
- * MongoDB is updated and persisted after each transition.
+ * MongoDB is updated atomically during task claim with generation increment.
  * Invalid transitions or jumps (e.g. pending -> completed) are rejected.
+ * Concurrent claims yield a typed TaskClaimConflictError without failing the mission.
  * 
  * @param {mongoose.Types.ObjectId|string} taskId - The ID of the MissionTask to execute
- * @param {object} [options={}] - Execution options (e.g. testing delays/failures)
+ * @param {object} [options={}] - Execution options (e.g. testing delays/failures, workerId)
  * @returns {Promise<import('mongoose').Document>} The updated MissionTask document
  */
 async function executeMissionTask(taskId, options = {}) {
   // 1. Task ID Validation
   if (!taskId || !mongoose.Types.ObjectId.isValid(taskId)) {
-    throw new Error('Invalid or missing taskId');
+    const err = new Error('Invalid or missing taskId');
+    err.code = 'INVALID_TASK_ID';
+    throw err;
   }
 
-  // 2. Transition: pending -> queued (guarded atomic update)
-  const queuedTask = await MissionTask.findOneAndUpdate(
-    { _id: taskId, status: 'pending' },
-    { $set: { status: 'queued' } },
-    { returnDocument: 'after' }
-  );
+  const workerId = options.workerId || `worker_${process.pid}_${Math.random().toString(36).substring(2, 9)}`;
 
-  if (!queuedTask) {
-    const existing = await MissionTask.findById(taskId);
-    if (!existing) {
-      throw new Error(`Task ${taskId} not found`);
-    }
-    if (existing.status === 'completed') {
-      throw new Error(`Cannot execute completed task ${taskId}`);
-    }
-    if (existing.status === 'running') {
-      throw new Error(`Cannot execute already running task ${taskId}`);
-    }
-    if (existing.status === 'failed') {
-      throw new Error(`Cannot execute failed task ${taskId}`);
-    }
-    throw new Error(`Invalid state transition: task ${taskId} is currently in '${existing.status}' state`);
-  }
-
-  // 3. Transition: queued -> running (guarded atomic update)
+  // 2. Single Atomic Transition: pending -> running with generation allocation
+  // Pipeline update safely handles executionMetadata whether null, missing, or an existing object
   const runningTask = await MissionTask.findOneAndUpdate(
-    { _id: taskId, status: 'queued' },
-    { $set: { status: 'running' } },
-    { returnDocument: 'after' }
+    { _id: taskId, status: 'pending' },
+    [
+      {
+        $set: {
+          status: 'running',
+          executionMetadata: {
+            $mergeObjects: [
+              { $ifNull: ['$executionMetadata', {}] },
+              {
+                claimedBy: workerId,
+                claimedAt: '$$NOW',
+                generation: {
+                  $add: [
+                    { $ifNull: ['$executionMetadata.generation', 0] },
+                    1,
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      },
+    ],
+    { returnDocument: 'after', updatePipeline: true }
   );
 
   if (!runningTask) {
     const existing = await MissionTask.findById(taskId);
-    throw new Error(`Invalid state transition: cannot transition task ${taskId} from '${existing ? existing.status : 'unknown'}' to 'running'`);
+    if (!existing) {
+      const err = new Error(`Task ${taskId} not found`);
+      err.code = 'TASK_NOT_FOUND';
+      throw err;
+    }
+    // Existing task is not pending; raise typed claim conflict
+    throw new TaskClaimConflictError(taskId, existing.status, {
+      claimedBy: existing.executionMetadata?.claimedBy || null,
+      generation: existing.executionMetadata?.generation || 0,
+    });
   }
 
   // 4. Execute deterministic task work with timeout protection
@@ -417,5 +444,6 @@ module.exports = {
   executeMissionTask,
   executeTaskWork,
   executeTaskWorkWithTimeout,
+  TaskClaimConflictError,
   DEFAULT_TASK_TIMEOUT_MS,
 };
