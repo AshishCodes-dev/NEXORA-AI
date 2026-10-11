@@ -319,7 +319,42 @@ async function executeMission(missionId, options = {}) {
       failed: false,
     };
   } catch (executionError) {
-    // 6. Transition mission: running -> failed on any task error
+    console.error(`[MISSION ORCHESTRATOR] Mission ${missionId} task execution failed:`, executionError.message);
+
+    // Test hook: controlled barrier before failure CAS for deterministic concurrency testing
+    if (typeof options.__barrierBeforeFailureCas === 'function') {
+      await options.__barrierBeforeFailureCas({ missionId });
+    }
+
+    // 6. Transition mission: running -> failed (atomic conditional CAS before emitting terminal failure events)
+    let failedMission;
+    try {
+      failedMission = await Mission.findOneAndUpdate(
+        { _id: missionId, status: 'running' },
+        { $set: { status: 'failed' } },
+        { returnDocument: 'after' }
+      );
+    } catch (dbErr) {
+      console.error(`[MISSION ORCHESTRATOR] Database error during failure CAS for mission ${missionId}:`, dbErr.message);
+      throw dbErr;
+    }
+
+    if (!failedMission) {
+      // Symmetrical Single-Winner Guard: Conditional update matched no document.
+      // Another concurrent caller or execution path already performed terminal transition
+      // (running -> completed or running -> failed).
+      // Do NOT emit duplicate terminal failure events or overwrite existing terminal state.
+      const currentMission = await Mission.findById(missionId);
+      return {
+        mission: currentMission,
+        tasks: executedTasks,
+        failed: currentMission?.status === 'failed',
+        alreadyRan: true,
+        error: executionError.message,
+      };
+    }
+
+    // Only the single winning caller that successfully performed running -> failed emits terminal events
     await recordStageTransition(missionId, {
       stage: 'failed',
       status: 'failed',
@@ -343,13 +378,6 @@ async function executeMission(missionId, options = {}) {
       action: 'Mark mission status as failed',
       outcome: 'failed',
     }).catch(() => {});
-
-    console.error(`[MISSION ORCHESTRATOR] Mission ${missionId} task execution failed:`, executionError.message);
-    const failedMission = await Mission.findOneAndUpdate(
-      { _id: missionId, status: 'running' },
-      { $set: { status: 'failed' } },
-      { returnDocument: 'after' }
-    ) || await Mission.findById(missionId);
 
     return {
       mission: failedMission,

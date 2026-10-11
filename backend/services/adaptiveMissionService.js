@@ -169,9 +169,18 @@ async function evaluateTaskFailure({
     const missionObjectId = new mongoose.Types.ObjectId(missionId);
     const taskObjectId = new mongoose.Types.ObjectId(taskId);
 
-    const mission = await Mission.findById(missionObjectId).select('_id userId executionMetadata').lean();
+    const mission = await Mission.findById(missionObjectId).select('_id userId status executionMetadata').lean();
     if (!mission) {
       return { action: 'BLOCK', decisionType: DECISION_TYPES.BLOCK_MISSION, reason: 'Mission not found' };
+    }
+
+    // Existing mission-terminal-state protection: do not requeue tasks if mission is already terminal
+    if (mission.status === 'completed' || mission.status === 'failed') {
+      return {
+        action: 'BLOCK',
+        decisionType: DECISION_TYPES.BLOCK_MISSION,
+        reason: `Mission ${missionId} is already in terminal state '${mission.status}'; adaptive retry rejected.`,
+      };
     }
 
     const task = await MissionTask.findById(taskObjectId).lean();
@@ -260,6 +269,65 @@ async function evaluateTaskFailure({
     const nextAttempt = currentAttempt + 1;
     const retryReason = `Transient failure detected (${cleanErrorMessage}). Re-queuing task under adaptive retry policy (attempt ${nextAttempt}/${maxRetries}).`;
 
+    // Safely normalize existing metadata
+    const existingMetadata = task.executionMetadata && typeof task.executionMetadata === 'object'
+      ? { ...task.executionMetadata }
+      : {};
+    existingMetadata.attempt = nextAttempt;
+    existingMetadata.lastRetryAt = new Date();
+    existingMetadata.isAdaptiveRetry = true;
+    existingMetadata.claimedBy = null; // Unset claimedBy so task is cleanly unowned when pending
+
+    // Construct atomic CAS filter requiring expected terminal 'failed' status and generation
+    const casFilter = {
+      _id: taskObjectId,
+      status: 'failed',
+    };
+
+    if (typeof task.executionMetadata?.generation === 'number') {
+      casFilter['executionMetadata.generation'] = task.executionMetadata.generation;
+    } else {
+      // Source-compatible legacy fallback: if generation was unallocated (null/missing),
+      // match only tasks that still have unallocated generation, preventing match on tasks claimed by newer generation
+      casFilter.$or = [
+        { 'executionMetadata.generation': null },
+        { 'executionMetadata.generation': { $exists: false } },
+      ];
+    }
+
+    // Test hook: controlled barrier before requeue CAS for deterministic concurrency testing
+    if (typeof options.__barrierBeforeRequeueCas === 'function') {
+      await options.__barrierBeforeRequeueCas({
+        taskId: taskObjectId,
+        expectedGeneration: task.executionMetadata?.generation,
+      });
+    }
+
+    // Atomically reset task state to 'pending' with incremented attempt
+    const requeuedTask = await MissionTask.findOneAndUpdate(
+      casFilter,
+      {
+        $set: {
+          status: 'pending',
+          error: cleanErrorMessage,
+          executionMetadata: existingMetadata,
+        },
+      },
+      { returnDocument: 'after' }
+    );
+
+    if (!requeuedTask) {
+      // CAS matched no document: task was claimed, recovered, completed, or altered concurrently.
+      // Do NOT emit RETRY_TASK decision event.
+      const blockReason = `Task ${taskObjectId} state or generation changed concurrently; adaptive retry aborted.`;
+      return {
+        action: 'BLOCK',
+        decisionType: DECISION_TYPES.BLOCK_MISSION,
+        reason: blockReason,
+      };
+    }
+
+    // Only the successful CAS transition records the canonical RETRY_TASK decision event
     await recordDecision({
       missionId: missionObjectId,
       userId: mission.userId,
@@ -274,23 +342,6 @@ async function evaluateTaskFailure({
         triggerError: cleanErrorMessage,
       },
     }).catch(() => {});
-
-    // Safely normalize existing metadata to prevent null field errors in MongoDB
-    const existingMetadata = task.executionMetadata && typeof task.executionMetadata === 'object'
-      ? { ...task.executionMetadata }
-      : {};
-    existingMetadata.attempt = nextAttempt;
-    existingMetadata.lastRetryAt = new Date();
-    existingMetadata.isAdaptiveRetry = true;
-
-    // Atomically reset task state to 'pending' with incremented attempt
-    await MissionTask.findByIdAndUpdate(taskObjectId, {
-      $set: {
-        status: 'pending',
-        error: cleanErrorMessage,
-        executionMetadata: existingMetadata,
-      },
-    });
 
     return {
       action: 'RETRY',
