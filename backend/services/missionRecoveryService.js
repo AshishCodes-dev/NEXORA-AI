@@ -330,7 +330,7 @@ async function reconcileAbandonedMissions(options = {}) {
       continue;
     }
 
-    // Check if pipeline has pending tasks or can proceed to finalization
+    // Check if pipeline has pending tasks, failed tasks, or all tasks completed
     const hasPendingTasks = await MissionTask.exists({
       missionId: mission._id,
       status: 'pending',
@@ -341,8 +341,20 @@ async function reconcileAbandonedMissions(options = {}) {
       status: 'failed',
     });
 
-    // If a task failed without retry, orchestrator will cleanly fail the mission when executed
-    if (hasPendingTasks || hasFailedPriorTasks) {
+    const hasTasks = await MissionTask.exists({
+      missionId: mission._id,
+    });
+
+    const hasIncompleteTasks = await MissionTask.exists({
+      missionId: mission._id,
+      status: { $ne: 'completed' },
+    });
+
+    const allTasksCompleted = Boolean(hasTasks && !hasIncompleteTasks);
+
+    // If a task failed without retry, orchestrator will cleanly fail the mission when executed.
+    // If all tasks completed, orchestrator will atomically finalize the mission as completed.
+    if (hasPendingTasks || hasFailedPriorTasks || allTasksCompleted) {
       stats.resumed++;
       if (options.executeSync) {
         await executeMission(mission._id, options.missionOptions || {});
