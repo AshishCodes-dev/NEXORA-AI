@@ -138,6 +138,15 @@ async function startServer() {
   try {
     validateAuthConfig();
     await connectDB();
+
+    // NEXORA Phase 2.3: Startup Crash Recovery & Stale Worker Reconciliation
+    try {
+      const { runStartupRecovery } = require('./services/missionRecoveryService');
+      await runStartupRecovery({ timeoutMs: 5000 });
+    } catch (recErr) {
+      console.warn('[STARTUP RECOVERY] Non-fatal recovery warning during startup:', recErr.message);
+    }
+
     serverInstance = app.listen(PORT, () => {
       console.log(`NEXORA backend server is running on port ${PORT}`);
     });
