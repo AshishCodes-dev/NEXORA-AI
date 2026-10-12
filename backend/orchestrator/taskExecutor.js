@@ -121,12 +121,26 @@ const WORKER_STATES = Object.freeze({
  * @returns {Promise<object>}
  */
 async function executeTaskWorkWithTimeout(taskOrFn, options = {}) {
-  const timeoutMs = typeof options === 'number'
+  let timeoutMs = typeof options === 'number'
     ? options
     : (options.taskTimeoutMs || DEFAULT_TASK_TIMEOUT_MS);
   const taskLabel = typeof taskOrFn === 'function'
     ? (options.title || 'task')
     : (taskOrFn?.title || taskOrFn?.order || 'task');
+
+  // If a mission deadline is specified, ensure task timeout never exceeds remaining mission budget
+  if (typeof options === 'object' && options?.missionDeadlineAt) {
+    const deadlineMs = new Date(options.missionDeadlineAt).getTime();
+    if (!Number.isNaN(deadlineMs)) {
+      const remainingUntilDeadline = deadlineMs - Date.now();
+      if (remainingUntilDeadline <= 0) {
+        const deadlineErr = new Error(`Task execution timed out: mission deadline already exceeded (${taskLabel})`);
+        deadlineErr.code = 'TASK_TIMEOUT';
+        throw deadlineErr;
+      }
+      timeoutMs = Math.min(timeoutMs, remainingUntilDeadline);
+    }
+  }
 
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
@@ -426,6 +440,18 @@ async function executeMissionTask(taskId, options = {}) {
       if (leaseStatus === 'LOST' || leaseStatus === 'EXPIRED_UNCERTAIN') {
         workerState = WORKER_STATES.FENCED_LOST;
         throw new LeaseLostError(taskId, currentGeneration, workerId, leaseStatus);
+      }
+    }
+
+    // Best-effort pre-completion deadline guard:
+    // If mission deadline expired during task execution, heartbeat drain, or barrier,
+    // abort completion and route to fenced task failure.
+    if (options.missionDeadlineAt) {
+      const dMs = new Date(options.missionDeadlineAt).getTime();
+      if (!Number.isNaN(dMs) && Date.now() >= dMs) {
+        const deadlineErr = new Error(`Task work completed after mission deadline exceeded (${new Date(dMs).toISOString()})`);
+        deadlineErr.code = 'TASK_TIMEOUT';
+        throw deadlineErr;
       }
     }
 

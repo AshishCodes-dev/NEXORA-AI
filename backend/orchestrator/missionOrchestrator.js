@@ -93,6 +93,31 @@ async function createMissionExecutionPlan(mission, options = {}) {
   }
 }
 
+const DEFAULT_MISSION_TIMEOUT_MS = 300000; // 5 minutes default
+const MIN_MISSION_TIMEOUT_MS = 1;          // 1 millisecond minimum (permits fast tests)
+const MAX_MISSION_TIMEOUT_MS = 86400000;   // 24 hours maximum safe cap
+
+/**
+ * Validates and normalizes totalTimeoutMs.
+ * Throws on non-numeric, non-finite, zero, or negative values.
+ * Returns DEFAULT_MISSION_TIMEOUT_MS if undefined/null.
+ * Clamps within [MIN_MISSION_TIMEOUT_MS, MAX_MISSION_TIMEOUT_MS].
+ *
+ * @param {unknown} val
+ * @returns {number}
+ */
+function resolveMissionTimeout(val) {
+  if (val === undefined || val === null) {
+    return DEFAULT_MISSION_TIMEOUT_MS;
+  }
+  if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+    if (val < MIN_MISSION_TIMEOUT_MS) return MIN_MISSION_TIMEOUT_MS;
+    if (val > MAX_MISSION_TIMEOUT_MS) return MAX_MISSION_TIMEOUT_MS;
+    return Math.floor(val);
+  }
+  throw new Error(`Invalid totalTimeoutMs: expected positive finite number, received ${val}`);
+}
+
 /**
  * Executes a mission through its lifecycle:
  * planning -> running -> completed (or running -> failed).
@@ -110,10 +135,22 @@ async function executeMission(missionId, options = {}) {
     throw new Error('Invalid or missing missionId');
   }
 
+  // Validate mission totalTimeoutMs option before state transition
+  const totalDurationMs = resolveMissionTimeout(options.totalTimeoutMs);
+
   // 2. Transition mission: planning/queued -> running (atomic guard against duplicate execution)
+  const now = new Date();
+  const computedDeadline = new Date(now.getTime() + totalDurationMs);
+
   let mission = await Mission.findOneAndUpdate(
     { _id: missionId, status: { $in: ['planning', 'queued'] } },
-    { $set: { status: 'running' } },
+    {
+      $set: {
+        status: 'running',
+        startedAt: now,
+        deadlineAt: computedDeadline,
+      },
+    },
     { returnDocument: 'after' }
   );
 
@@ -127,6 +164,18 @@ async function executeMission(missionId, options = {}) {
       return { mission: existing, alreadyRan: true };
     }
     // Mission is already in 'running' state; orchestrator evaluates in-flight guard inside task loop
+    // Verify existing deadline validity. NEVER grant an existing running mission a fresh full duration.
+    if (!existing.deadlineAt || Number.isNaN(new Date(existing.deadlineAt).getTime())) {
+      // Fail-safe handling: A running mission without a valid persisted deadline cannot be safely repaired
+      // because the original duration is not persisted. Reconstructing it with caller-supplied options
+      // risks extending the mission's original budget.
+      // Conditionally transition the mission from running to failed using a status-guarded database update:
+      await Mission.findOneAndUpdate(
+        { _id: missionId, status: 'running' },
+        { $set: { status: 'failed' } }
+      );
+      throw new Error(`Mission ${missionId} is running with missing or invalid deadlineAt; cannot establish safe deadline.`);
+    }
     mission = existing;
   }
 
@@ -139,12 +188,14 @@ async function executeMission(missionId, options = {}) {
 
   // 4. Execute tasks strictly sequentially (dynamic pending queue)
   const executedTasks = [];
-  const startTime = Date.now();
-  const maxMissionDurationMs = options.totalTimeoutMs || 300000; // 5 minutes default
+  const startTime = mission.startedAt ? new Date(mission.startedAt).getTime() : Date.now();
+  const deadlineMs = new Date(mission.deadlineAt).getTime();
   try {
     while (true) {
-      if (Date.now() - startTime > maxMissionDurationMs) {
-        throw new Error(`Mission execution exceeded maximum allowable duration of ${maxMissionDurationMs}ms`);
+      const nowMs = Date.now();
+      const remainingMs = deadlineMs - nowMs;
+      if (remainingMs <= 0) {
+        throw new Error(`Mission execution deadline exceeded (deadline was ${mission.deadlineAt instanceof Date ? mission.deadlineAt.toISOString() : new Date(mission.deadlineAt).toISOString()})`);
       }
 
       // In-flight concurrency guard:
@@ -200,10 +251,20 @@ async function executeMission(missionId, options = {}) {
       const taskStage = mapTaskToStage(nextTask);
       recordStageTransition(missionId, { stage: taskStage, status: 'started' }).catch(() => {});
 
+      const remainingForTaskMs = deadlineMs - Date.now();
+      if (remainingForTaskMs <= 0) {
+        throw new Error(`Mission execution deadline exceeded (deadline was ${mission.deadlineAt instanceof Date ? mission.deadlineAt.toISOString() : new Date(mission.deadlineAt).toISOString()})`);
+      }
+
+      const configuredTaskTimeout = options.taskTimeoutMs !== undefined ? options.taskTimeoutMs : 120000;
+      const boundedTaskTimeoutMs = Math.min(configuredTaskTimeout, remainingForTaskMs);
+
       const taskOptions = {
         ...options,
         attempt: nextTask.executionMetadata?.attempt || 1,
         missionObjective: mission.objective,
+        taskTimeoutMs: boundedTaskTimeoutMs,
+        missionDeadlineAt: mission.deadlineAt,
       };
 
       let executed;
@@ -230,7 +291,7 @@ async function executeMission(missionId, options = {}) {
           error: taskError,
           currentAttempt: nextTask.executionMetadata?.attempt || 1,
           missionStartTime: startTime,
-          maxMissionDurationMs,
+          maxMissionDurationMs: totalDurationMs,
           options,
         }).catch((evalErr) => {
           console.warn('[ADAPTIVE LOOP] Failure evaluation error:', evalErr.message);
@@ -391,4 +452,8 @@ async function executeMission(missionId, options = {}) {
 module.exports = {
   createMissionExecutionPlan,
   executeMission,
+  resolveMissionTimeout,
+  DEFAULT_MISSION_TIMEOUT_MS,
+  MIN_MISSION_TIMEOUT_MS,
+  MAX_MISSION_TIMEOUT_MS,
 };

@@ -169,7 +169,7 @@ async function evaluateTaskFailure({
     const missionObjectId = new mongoose.Types.ObjectId(missionId);
     const taskObjectId = new mongoose.Types.ObjectId(taskId);
 
-    const mission = await Mission.findById(missionObjectId).select('_id userId status executionMetadata').lean();
+    const mission = await Mission.findById(missionObjectId).select('_id userId status executionMetadata deadlineAt startedAt').lean();
     if (!mission) {
       return { action: 'BLOCK', decisionType: DECISION_TYPES.BLOCK_MISSION, reason: 'Mission not found' };
     }
@@ -191,22 +191,41 @@ async function evaluateTaskFailure({
     const rawErrorMessage = error ? (error.message || String(error)) : 'Unknown task execution error';
     const cleanErrorMessage = sanitizeEventString(rawErrorMessage, 300) || 'Task execution failed';
 
-    // 1. Mission Deadline Check
-    const elapsedMs = Date.now() - missionStartTime;
-    if (elapsedMs >= maxMissionDurationMs) {
-      const reason = `Mission execution duration (${elapsedMs}ms) exceeded maximum allowable timeout (${maxMissionDurationMs}ms). Halting pipeline.`;
+    // 1. Mission Deadline Check (Canonical deadlineAt preferred, fallback to elapsedMs if legacy)
+    let isDeadlineExpired = false;
+    let deadlineReason = null;
+    let deadlineMeta = {};
+
+    if (mission.deadlineAt) {
+      const deadlineMs = new Date(mission.deadlineAt).getTime();
+      const nowMs = Date.now();
+      if (!Number.isNaN(deadlineMs) && nowMs >= deadlineMs) {
+        isDeadlineExpired = true;
+        deadlineReason = `Mission execution deadline exceeded (deadline was ${new Date(deadlineMs).toISOString()}). Halting pipeline.`;
+        deadlineMeta = { nowMs, deadlineAt: mission.deadlineAt };
+      }
+    } else if (missionStartTime && maxMissionDurationMs) {
+      const elapsedMs = Date.now() - missionStartTime;
+      if (elapsedMs >= maxMissionDurationMs) {
+        isDeadlineExpired = true;
+        deadlineReason = `Mission execution duration (${elapsedMs}ms) exceeded maximum allowable timeout (${maxMissionDurationMs}ms). Halting pipeline.`;
+        deadlineMeta = { elapsedMs, maxMissionDurationMs };
+      }
+    }
+
+    if (isDeadlineExpired) {
       await recordDecision({
         missionId: missionObjectId,
         userId: mission.userId,
         decisionType: DECISION_TYPES.BLOCK_MISSION,
         taskId: taskObjectId,
-        reason,
+        reason: deadlineReason,
         action: 'Halt mission execution pipeline on deadline breach',
         outcome: 'failed',
-        metadata: { elapsedMs, maxMissionDurationMs },
+        metadata: deadlineMeta,
       }).catch(() => {});
 
-      return { action: 'BLOCK', decisionType: DECISION_TYPES.BLOCK_MISSION, reason };
+      return { action: 'BLOCK', decisionType: DECISION_TYPES.BLOCK_MISSION, reason: deadlineReason };
     }
 
     // 2. Adaptive Action Budget Check

@@ -18,6 +18,15 @@ const missionSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    startedAt: {
+      type: Date,
+      default: null,
+    },
+    deadlineAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
   },
   {
     timestamps: true,
