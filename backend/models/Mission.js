@@ -33,6 +33,8 @@ const missionSchema = new mongoose.Schema(
   }
 );
 
+missionSchema.index({ status: 1, deadlineAt: 1 });
+
 const Mission = mongoose.model('Mission', missionSchema);
 
 module.exports = Mission;

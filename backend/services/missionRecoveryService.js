@@ -2,10 +2,41 @@ const mongoose = require('mongoose');
 const Mission = require('../models/Mission');
 const MissionTask = require('../models/MissionTask');
 const { recordEvent, EVENT_TYPES } = require('./missionEventService');
+const { recordStageTransition, computeMissionMetrics } = require('./telemetry/telemetryService');
 const { executeMission } = require('../orchestrator/missionOrchestrator');
 const { LEASE_DURATION_MS } = require('../orchestrator/taskExecutor');
 
 const MAX_TASK_RETRIES = 2;
+
+/**
+ * Helper to determine if an error represents a cluster-level database connectivity outage
+ * rather than an isolated, recoverable document-level error.
+ *
+ * @param {Error} err
+ * @returns {boolean}
+ */
+function isDatabaseOutage(err) {
+  if (mongoose.connection && mongoose.connection.readyState !== 1) {
+    return true;
+  }
+  if (!err) return false;
+  if (
+    err.name === 'MongoServerSelectionError' ||
+    err.name === 'MongoNetworkError' ||
+    err.name === 'MongoNetworkTimeoutError' ||
+    err.name === 'MongoTopologyClosedError' ||
+    err.name === 'MongoNotConnectedError'
+  ) {
+    return true;
+  }
+  if (
+    typeof err.message === 'string' &&
+    /topology was destroyed|connection closed|client is closed|server selection timed out|ECONNREFUSED|ENOTFOUND/i.test(err.message)
+  ) {
+    return true;
+  }
+  return false;
+}
 
 /**
  * Reconciles tasks whose worker leases have expired.
@@ -23,7 +54,7 @@ const MAX_TASK_RETRIES = 2;
  * @param {object} [options={}]
  * @param {number} [options.leaseDurationMs] - Custom lease duration (defaults to LEASE_DURATION_MS = 25000)
  * @param {mongoose.Types.ObjectId|string} [options.missionId] - Optional scope to specific mission
- * @returns {Promise<{reclaimedToPending: number, failedExhausted: number, skippedActive: number, invalidSkipped: number}>}
+ * @returns {Promise<{reclaimedToPending: number, failedExhausted: number, skippedActive: number, invalidSkipped: number, errors: number}>}
  */
 async function reconcileStaleTasks(options = {}) {
   const leaseDurationMs = typeof options.leaseDurationMs === 'number' && options.leaseDurationMs > 0
@@ -48,10 +79,16 @@ async function reconcileStaleTasks(options = {}) {
     skippedActive: 0,
     invalidSkipped: 0,
     invalidFailed: 0,
+    errors: 0,
   };
 
   for (const task of runningTasks) {
-    const meta = task.executionMetadata || {};
+    if (stopRequested && isPeriodicSweepRunning) {
+      console.log('[MISSION RECOVERY] Stop requested; aborting stale tasks sweep.');
+      break;
+    }
+    try {
+      const meta = task.executionMetadata || {};
     const heartbeatAt = meta.heartbeatAt ? new Date(meta.heartbeatAt) : null;
     const claimedAt = meta.claimedAt ? new Date(meta.claimedAt) : null;
     const currentGeneration = meta.generation;
@@ -222,6 +259,13 @@ async function reconcileStaleTasks(options = {}) {
         }).catch(() => {});
       }
     }
+    } catch (taskErr) {
+      if (isDatabaseOutage(taskErr)) {
+        throw taskErr;
+      }
+      stats.errors++;
+      console.error(`[MISSION RECOVERY] Recoverable error reconciling stale task ${task._id}:`, taskErr.message);
+    }
   }
 
   return stats;
@@ -262,10 +306,16 @@ async function reconcileAbandonedMissions(options = {}) {
     failedInvalidDeadline: 0,
     resumed: 0,
     skippedActive: 0,
+    errors: 0,
   };
 
   for (const mission of runningMissions) {
-    // 1. Missing or invalid deadlineAt: Fail safe without granting a new budget
+    if (stopRequested && isPeriodicSweepRunning) {
+      console.log('[MISSION RECOVERY] Stop requested; aborting abandoned missions sweep.');
+      break;
+    }
+    try {
+      // 1. Missing or invalid deadlineAt: Fail safe without granting a new budget
     if (!mission.deadlineAt || Number.isNaN(new Date(mission.deadlineAt).getTime())) {
       const failed = await Mission.findOneAndUpdate(
         { _id: mission._id, status: 'running' },
@@ -274,14 +324,27 @@ async function reconcileAbandonedMissions(options = {}) {
       );
       if (failed) {
         stats.failedInvalidDeadline++;
+        const failureReason = 'Mission running with missing or invalid deadlineAt; failed safely during recovery.';
+        await recordStageTransition(mission._id, {
+          stage: 'failed',
+          status: 'failed',
+          metadata: { error: failureReason },
+        }).catch((err) => {
+          console.warn(`[MISSION RECOVERY] Failed to record stage transition for mission ${mission._id}:`, err.message);
+        });
+        await computeMissionMetrics(mission._id).catch((err) => {
+          console.warn(`[MISSION RECOVERY] Failed to compute metrics for mission ${mission._id}:`, err.message);
+        });
         await recordEvent({
           missionId: mission._id,
           userId: mission.userId,
           type: EVENT_TYPES.MISSION_FAILED,
-          reason: 'Mission running with missing or invalid deadlineAt; failed safely during recovery.',
+          reason: failureReason,
           action: 'Mark mission failed on missing deadline',
           outcome: 'failed',
-        }).catch(() => {});
+        }).catch((err) => {
+          console.warn(`[MISSION RECOVERY] Failed to record failure event for mission ${mission._id}:`, err.message);
+        });
       }
       continue;
     }
@@ -296,14 +359,27 @@ async function reconcileAbandonedMissions(options = {}) {
       );
       if (failed) {
         stats.failedExpired++;
+        const failureReason = `Mission execution deadline exceeded (${new Date(deadlineMs).toISOString()}) during recovery.`;
+        await recordStageTransition(mission._id, {
+          stage: 'failed',
+          status: 'failed',
+          metadata: { error: failureReason },
+        }).catch((err) => {
+          console.warn(`[MISSION RECOVERY] Failed to record stage transition for mission ${mission._id}:`, err.message);
+        });
+        await computeMissionMetrics(mission._id).catch((err) => {
+          console.warn(`[MISSION RECOVERY] Failed to compute metrics for mission ${mission._id}:`, err.message);
+        });
         await recordEvent({
           missionId: mission._id,
           userId: mission.userId,
           type: EVENT_TYPES.MISSION_FAILED,
-          reason: `Mission execution deadline exceeded (${new Date(deadlineMs).toISOString()}) during recovery.`,
+          reason: failureReason,
           action: 'Mark mission failed on deadline expiry',
           outcome: 'failed',
-        }).catch(() => {});
+        }).catch((err) => {
+          console.warn(`[MISSION RECOVERY] Failed to record failure event for mission ${mission._id}:`, err.message);
+        });
       }
       continue;
     }
@@ -355,16 +431,28 @@ async function reconcileAbandonedMissions(options = {}) {
     // If a task failed without retry, orchestrator will cleanly fail the mission when executed.
     // If all tasks completed, orchestrator will atomically finalize the mission as completed.
     if (hasPendingTasks || hasFailedPriorTasks || allTasksCompleted) {
+      if (stopRequested && isPeriodicSweepRunning) {
+        console.log(`[MISSION RECOVERY] Stop requested; skipping resumption of mission ${mission._id}.`);
+        break;
+      }
       stats.resumed++;
       if (options.executeSync) {
         await executeMission(mission._id, options.missionOptions || {});
       } else {
         setImmediate(() => {
+          if (stopRequested) return;
           executeMission(mission._id, options.missionOptions || {}).catch((err) => {
             console.error(`[MISSION RECOVERY] Error resuming mission ${mission._id}:`, err.message);
           });
         });
       }
+    }
+    } catch (missionErr) {
+      if (isDatabaseOutage(missionErr)) {
+        throw missionErr;
+      }
+      stats.errors++;
+      console.error(`[MISSION RECOVERY] Recoverable error reconciling abandoned mission ${mission._id}:`, missionErr.message);
     }
   }
 
@@ -417,10 +505,149 @@ async function runStartupRecovery(options = {}) {
   return await recoveryWork();
 }
 
+let periodicTimer = null;
+let isPeriodicSweepRunning = false;
+let currentSweepPromise = null;
+let stopRequested = false;
+
+/**
+ * Starts a periodic background recovery sweeper.
+ *
+ * Safety invariants:
+ * 1. Default interval is 30,000ms; validated to be a positive number.
+ * 2. Idempotent: repeated calls do not create duplicate timers.
+ * 3. In-flight guard: overlapping sweeps are prevented; a tick yields if a sweep is already in progress.
+ * 4. DB outage awareness: skips tight polling if database connection is not ready.
+ *
+ * @param {object} [options={}]
+ * @param {number} [options.intervalMs=30000] - Interval between recovery sweeps in ms
+ * @param {object} [options.recoveryOptions={}] - Options forwarded to reconcile functions
+ * @param {boolean} [options.unref=true] - Whether to unref the timer
+ * @returns {boolean} True if started, false if already running
+ */
+function startPeriodicRecovery(options = {}) {
+  const intervalMs = (typeof options.intervalMs === 'number' && options.intervalMs > 0)
+    ? options.intervalMs
+    : 30000;
+
+  if (periodicTimer) {
+    // Already active; idempotent no-op
+    return false;
+  }
+
+  stopRequested = false;
+
+  const runSweep = async () => {
+    if (stopRequested) return;
+    if (isPeriodicSweepRunning) {
+      console.log('[PERIODIC RECOVERY] Prior sweep still in progress; skipping tick.');
+      return;
+    }
+
+    if (mongoose.connection && mongoose.connection.readyState !== 1) {
+      console.warn('[PERIODIC RECOVERY] Database not connected; skipping sweep.');
+      return;
+    }
+
+    isPeriodicSweepRunning = true;
+    try {
+      currentSweepPromise = (async () => {
+        const recoveryOpts = options.recoveryOptions || {};
+        const taskStats = await reconcileStaleTasks(recoveryOpts);
+        if (stopRequested) return { tasks: taskStats, missions: { resumed: 0 } };
+        const missionStats = await reconcileAbandonedMissions(recoveryOpts);
+        return { tasks: taskStats, missions: missionStats };
+      })();
+      await currentSweepPromise;
+    } catch (sweepErr) {
+      console.error('[PERIODIC RECOVERY] Error during background sweep:', sweepErr.message);
+    } finally {
+      isPeriodicSweepRunning = false;
+      currentSweepPromise = null;
+    }
+  };
+
+  periodicTimer = setInterval(runSweep, intervalMs);
+  if (periodicTimer.unref && options.unref !== false) {
+    periodicTimer.unref();
+  }
+
+  return true;
+}
+
+/**
+ * Stops the periodic background recovery sweeper cleanly.
+ *
+ * Safety invariants:
+ * 1. Clears interval timer immediately to prevent future ticks.
+ * 2. If a sweep is currently in flight, awaits it up to bounded timeoutMs.
+ * 3. Idempotent: safe to call multiple times.
+ *
+ * @param {object} [options={}]
+ * @param {number} [options.timeoutMs=5000] - Maximum duration in ms to wait for in-flight sweep
+ * @returns {Promise<{stopped: boolean, inFlightDrained: boolean}>}
+ */
+async function stopPeriodicRecovery(options = {}) {
+  stopRequested = true;
+
+  if (periodicTimer) {
+    clearInterval(periodicTimer);
+    periodicTimer = null;
+  }
+
+  const timeoutMs = (typeof options.timeoutMs === 'number' && options.timeoutMs >= 0)
+    ? options.timeoutMs
+    : 5000;
+
+  let inFlightDrained = true;
+
+  try {
+    if (currentSweepPromise && timeoutMs > 0) {
+      let timer;
+      const timeoutPromise = new Promise((resolve) => {
+        timer = setTimeout(() => {
+          console.warn(`[PERIODIC RECOVERY] In-flight sweep did not settle within ${timeoutMs}ms timeout.`);
+          inFlightDrained = false;
+          resolve();
+        }, timeoutMs);
+      });
+
+      try {
+        await Promise.race([
+          currentSweepPromise.catch(() => {}),
+          timeoutPromise,
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    return {
+      stopped: true,
+      inFlightDrained,
+    };
+  } finally {
+    if (!isPeriodicSweepRunning) {
+      stopRequested = false;
+    }
+  }
+}
+
+function getPeriodicRecoveryState() {
+  return {
+    isActive: Boolean(periodicTimer),
+    isSweepRunning: isPeriodicSweepRunning,
+  };
+}
+
 module.exports = {
   reconcileStaleTasks,
   reconcileAbandonedMissions,
   runStartupRecovery,
+  startPeriodicRecovery,
+  stopPeriodicRecovery,
+  getPeriodicRecoveryState,
+  isDatabaseOutage,
   MAX_TASK_RETRIES,
   LEASE_DURATION_MS,
 };

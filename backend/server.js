@@ -78,6 +78,7 @@ app.use(centralErrorHandler);
 
 let serverInstance = null;
 let isShuttingDown = false;
+let shutdownPromise = null;
 
 /**
  * Graceful shutdown handler for HTTP server and database connections
@@ -85,41 +86,99 @@ let isShuttingDown = false;
  * @returns {Promise<void>}
  */
 const gracefulShutdown = async (signal) => {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  console.log(`[SHUTDOWN] Received ${signal}. Starting graceful shutdown...`);
-
-  // Failsafe timer (10s) in case graceful shutdown hangs
-  const forceTimer = setTimeout(() => {
-    console.error('[SHUTDOWN] Forceful shutdown initiated after timeout.');
-    if (process.env.NODE_ENV !== 'test') {
-      process.exit(1);
-    }
-  }, 10000);
-  if (forceTimer.unref) forceTimer.unref();
-
-  try {
-    if (serverInstance) {
-      await new Promise((resolve) => serverInstance.close(resolve));
-      console.log('[SHUTDOWN] HTTP server closed.');
-    }
-    if (mongoose.connection && mongoose.connection.readyState !== 0) {
-      await mongoose.connection.close(false);
-      console.log('[DATABASE] MongoDB connection closed.');
-    }
-    clearTimeout(forceTimer);
-    console.log('[SHUTDOWN] Graceful shutdown completed cleanly.');
-    if (process.env.NODE_ENV !== 'test') {
-      process.exit(0);
-    }
-  } catch (err) {
-    console.error(`[SHUTDOWN] Error during shutdown: ${err.message}`);
-    clearTimeout(forceTimer);
-    if (process.env.NODE_ENV !== 'test') {
-      process.exit(1);
-    }
+  if (shutdownPromise) {
+    console.log(`[SHUTDOWN] Shutdown already in progress. Reusing existing shutdown promise for ${signal}.`);
+    return shutdownPromise;
   }
+
+  shutdownPromise = (async () => {
+    isShuttingDown = true;
+    console.log(`[SHUTDOWN] Received ${signal}. Starting graceful shutdown...`);
+
+    // Failsafe timer (10s) in case graceful shutdown hangs
+    const forceTimer = setTimeout(() => {
+      console.error('[SHUTDOWN] Forceful shutdown initiated after timeout.');
+      if (process.env.NODE_ENV !== 'test') {
+        process.exit(1);
+      }
+    }, 10000);
+    if (forceTimer.unref) forceTimer.unref();
+
+    try {
+      // Stage 1: Stop periodic recovery sweeper and await in-flight sweep completion
+      console.log('[SHUTDOWN] [Stage 1/4] Stopping periodic recovery sweeper...');
+      let recoveryDrained = true;
+      try {
+        const { stopPeriodicRecovery } = require('./services/missionRecoveryService');
+        const sweepResult = await stopPeriodicRecovery({ timeoutMs: 5000 });
+        if (sweepResult && !sweepResult.inFlightDrained) {
+          recoveryDrained = false;
+          console.warn('[SHUTDOWN] [Stage 1/4] Warning: In-flight recovery sweep did not drain within 5000ms.');
+        } else {
+          console.log('[SHUTDOWN] [Stage 1/4] Periodic recovery sweeper stopped cleanly.');
+        }
+      } catch (sweeperErr) {
+        console.warn(`[SHUTDOWN] [Stage 1/4] Warning stopping periodic recovery: ${sweeperErr.message}`);
+      }
+
+      // Stage 2: Pause task claims and drain active workers
+      console.log('[SHUTDOWN] [Stage 2/4] Pausing task claims and draining active workers...');
+      try {
+        const { drainActiveWorkers } = require('./orchestrator/taskExecutor');
+        const drainResult = await drainActiveWorkers({ timeoutMs: 5000 });
+        console.log(`[SHUTDOWN] [Stage 2/4] Active workers drained (drained: ${drainResult.drained}, active: ${drainResult.activeCount}, surrendered: ${drainResult.surrenderedCount}).`);
+      } catch (workerErr) {
+        console.warn(`[SHUTDOWN] [Stage 2/4] Warning draining active workers: ${workerErr.message}`);
+      }
+
+      // Stage 3: Close HTTP server
+      console.log('[SHUTDOWN] [Stage 3/4] Closing HTTP server...');
+      if (serverInstance) {
+        await new Promise((resolve) => serverInstance.close(resolve));
+        console.log('[SHUTDOWN] [Stage 3/4] HTTP server closed.');
+      } else {
+        console.log('[SHUTDOWN] [Stage 3/4] HTTP server was not active.');
+      }
+
+      // Stage 4: Close MongoDB connection safely
+      console.log('[SHUTDOWN] [Stage 4/4] Closing database connections...');
+      if (!recoveryDrained) {
+        console.error('[SHUTDOWN] [Stage 4/4] In-flight recovery operation is still active; refusing to close database connection to prevent racing queries.');
+        if (process.env.NODE_ENV !== 'test') {
+          process.exit(1);
+        }
+        return;
+      }
+
+      if (mongoose.connection && mongoose.connection.readyState !== 0) {
+        await mongoose.connection.close(false);
+        console.log('[DATABASE] MongoDB connection closed.');
+      } else {
+        console.log('[DATABASE] MongoDB was not connected.');
+      }
+
+      clearTimeout(forceTimer);
+      console.log('[SHUTDOWN] Graceful shutdown completed cleanly.');
+      if (process.env.NODE_ENV !== 'test') {
+        process.exit(0);
+      }
+    } catch (err) {
+      console.error(`[SHUTDOWN] Error during shutdown: ${err.message}`);
+      clearTimeout(forceTimer);
+      if (process.env.NODE_ENV !== 'test') {
+        process.exit(1);
+      }
+    }
+  })();
+
+  return shutdownPromise;
 };
+
+function _resetShutdownForTesting() {
+  isShuttingDown = false;
+  shutdownPromise = null;
+  serverInstance = null;
+}
 
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
@@ -150,6 +209,16 @@ async function startServer() {
     serverInstance = app.listen(PORT, () => {
       console.log(`NEXORA backend server is running on port ${PORT}`);
     });
+
+    // NEXORA Phase 2.5: Continuous Periodic Recovery Sweeper
+    try {
+      const { startPeriodicRecovery } = require('./services/missionRecoveryService');
+      startPeriodicRecovery();
+      console.log('[PERIODIC RECOVERY] Background recovery sweeper started.');
+    } catch (sweepErr) {
+      console.warn('[PERIODIC RECOVERY] Failed to start periodic recovery sweeper:', sweepErr.message);
+    }
+
     return serverInstance;
   } catch (error) {
     console.error(`Failed to start NEXORA server: ${error.message}`);
@@ -161,4 +230,4 @@ if (require.main === module) {
   startServer();
 }
 
-module.exports = { app, startServer, gracefulShutdown };
+module.exports = { app, startServer, gracefulShutdown, _resetShutdownForTesting };

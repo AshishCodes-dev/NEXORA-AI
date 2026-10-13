@@ -4,6 +4,9 @@ const { executeTaskWithAgent } = require('../agents/agentExecutionGateway');
 const { recordTaskStart, recordTaskEnd, categorizeTaskError } = require('../services/telemetry/telemetryService');
 const { recordEvent, recordDecision, EVENT_TYPES, DECISION_TYPES } = require('../services/missionEventService');
 
+let isTaskClaimsPaused = false;
+const activeWorkers = new Map();
+
 /**
  * Task Work Execution
  * Dispatches the running MissionTask to the Agent Execution Gateway.
@@ -110,6 +113,7 @@ const WORKER_STATES = Object.freeze({
   FAILING_CAS: 'FAILING_CAS',
   CONFIRMED_FAILED: 'CONFIRMED_FAILED',
   FENCED_LOST: 'FENCED_LOST',
+  SURRENDERED: 'SURRENDERED',
 });
 
 /**
@@ -216,6 +220,13 @@ async function executeMissionTask(taskId, options = {}) {
     throw err;
   }
 
+  // Check if claims are paused due to shutdown
+  if (isTaskClaimsPaused) {
+    const pauseErr = new Error('Task claims are paused due to shutdown');
+    pauseErr.code = 'TASK_CLAIMS_PAUSED';
+    throw pauseErr;
+  }
+
   const workerId = options.workerId || `worker_${process.pid}_${Math.random().toString(36).substring(2, 9)}`;
 
   // 2. Single Atomic Transition: pending -> running with generation allocation
@@ -279,6 +290,33 @@ async function executeMissionTask(taskId, options = {}) {
   let lastSuccessfulHeartbeatAt = Date.now();
   let consecutiveHeartbeatErrors = 0;
   const abortController = new AbortController();
+
+  let resolveCompletion;
+  const executionPromise = new Promise((resolve) => {
+    resolveCompletion = resolve;
+  });
+
+  // Conservative classification: Tasks default to NOT safe to surrender unless safety is explicitly established.
+  // Browser, research, external I/O, or any task with side effects or without explicit safeToCancel: true are treated as unsafe.
+  const isKnownSideEffectingAgent = ['browser', 'research'].includes(runningTask.agentId?.toLowerCase());
+  const safeToCancel = Boolean(
+    options.safeToCancel === true &&
+    !options.hasSideEffects &&
+    !runningTask.executionMetadata?.hasSideEffects &&
+    !isKnownSideEffectingAgent
+  );
+
+  const workerRecord = {
+    taskId: taskId.toString(),
+    workerId,
+    generation: currentGeneration,
+    abortController,
+    safeToCancel,
+    isSurrendered: false,
+    abortedCleanly: false,
+    executionPromise,
+  };
+  activeWorkers.set(taskId.toString(), workerRecord);
 
   function handleHeartbeatError(err) {
     consecutiveHeartbeatErrors++;
@@ -629,7 +667,7 @@ async function executeMissionTask(taskId, options = {}) {
       throw workError;
     }
 
-    // 2. If lease was lost or expired uncertain
+    // 2. If lease was lost or expired uncertain during execution or heartbeat
     if (workError instanceof LeaseLostError || leaseStatus === 'LOST' || leaseStatus === 'EXPIRED_UNCERTAIN') {
       workerState = WORKER_STATES.FENCED_LOST;
       if (heartbeatTimer) {
@@ -639,6 +677,17 @@ async function executeMissionTask(taskId, options = {}) {
       throw (workError instanceof LeaseLostError
         ? workError
         : new LeaseLostError(taskId, currentGeneration, workerId, leaseStatus));
+    }
+
+    // 3. If task execution was aborted during shutdown or already marked surrendered
+    if (workError.name === 'AbortError' || workError.code === 'TASK_ABORTED' || workerRecord?.isSurrendered) {
+      workerState = WORKER_STATES.SURRENDERED;
+      if (workerRecord) {
+        workerRecord.abortedCleanly = true;
+      }
+      const abortErr = new Error(`Task ${taskId} execution aborted during shutdown`);
+      abortErr.code = 'TASK_ABORTED';
+      throw abortErr;
     }
 
     // 3. Normal work failure path:
@@ -731,7 +780,188 @@ async function executeMissionTask(taskId, options = {}) {
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
     }
+    activeWorkers.delete(taskId.toString());
+    if (resolveCompletion) {
+      resolveCompletion();
+    }
   }
+}
+
+/**
+ * Cooperatively surrenders an active task lease back to 'pending'.
+ * Guarded by atomic CAS on taskId, status: 'running', claimedBy: workerId, generation.
+ * Increments generation so any subsequent writes from this worker are strictly fenced.
+ *
+ * @param {mongoose.Types.ObjectId|string} taskId
+ * @param {object} options
+ * @param {string} options.workerId
+ * @param {number} options.generation
+ * @param {string} [options.reason='Shutdown lease surrender']
+ * @returns {Promise<import('mongoose').Document|null>} The updated document or null if CAS lost
+ */
+async function surrenderTaskLease(taskId, options = {}) {
+  if (!taskId) return null;
+  const { workerId, generation, reason } = options;
+  if (!workerId || generation === undefined) {
+    throw new Error('workerId and generation are required to surrender task lease');
+  }
+
+  const surrenderedTask = await MissionTask.findOneAndUpdate(
+    {
+      _id: taskId,
+      status: 'running',
+      'executionMetadata.claimedBy': workerId,
+      'executionMetadata.generation': generation,
+    },
+    [
+      {
+        $set: {
+          status: 'pending',
+          executionMetadata: {
+            $mergeObjects: [
+              { $ifNull: ['$executionMetadata', {}] },
+              {
+                claimedBy: null,
+                surrenderedAt: '$$NOW',
+                surrenderReason: reason || 'Shutdown lease surrender',
+                generation: {
+                  $add: [
+                    { $ifNull: ['$executionMetadata.generation', 0] },
+                    1,
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      },
+    ],
+    { returnDocument: 'after', updatePipeline: true }
+  );
+
+  return surrenderedTask;
+}
+
+/**
+ * Drains active workers during shutdown.
+ *
+ * Safety invariants:
+ * 1. Pauses task claims immediately to prevent new task dispatches.
+ * 2. If tasks are safe to cancel (no committed state/side effects), aborts their
+ *    in-flight work and cooperatively surrenders their leases to 'pending' via CAS.
+ * 3. If tasks have unsafe side effects (safeToCancel === false), does NOT force-release
+ *    them to 'pending'. Awaits their completion up to timeoutMs; if not finished,
+ *    leaves them 'running' for subsequent lease-expiry recovery after exit.
+ * 4. Bounded wait up to timeoutMs.
+ *
+ * @param {object} [options={}]
+ * @param {number} [options.timeoutMs=5000]
+ * @returns {Promise<{drained: boolean, activeCount: number, surrenderedCount: number}>}
+ */
+async function drainActiveWorkers(options = {}) {
+  const timeoutMs = (typeof options.timeoutMs === 'number' && options.timeoutMs >= 0)
+    ? options.timeoutMs
+    : 5000;
+
+  pauseTaskClaims();
+
+  if (activeWorkers.size === 0) {
+    return { drained: true, activeCount: 0, surrenderedCount: 0 };
+  }
+
+  // 1. Send abort signals where supported
+  const workersToEvaluate = Array.from(activeWorkers.values());
+  const executionPromises = [];
+
+  for (const worker of workersToEvaluate) {
+    if (worker.abortController) {
+      worker.abortController.abort();
+    }
+    if (worker.executionPromise) {
+      executionPromises.push(worker.executionPromise.catch(() => {}));
+    }
+  }
+
+  // 2. Await actual worker execution promises settling within the bounded drain window
+  let settledInTime = true;
+  if (executionPromises.length > 0 && timeoutMs > 0) {
+    let timer;
+    const timeoutPromise = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        settledInTime = false;
+        resolve();
+      }, timeoutMs);
+    });
+
+    try {
+      await Promise.race([
+        Promise.all(executionPromises),
+        timeoutPromise,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // 3. Before returning a task to pending, verify that the worker execution has ACTUALLY settled!
+  // If execution settled cleanly within the window, and task was safeToCancel, surrender the lease cooperatively.
+  // If execution did not settle, do NOT surrender the lease; leave the task running for lease-expiry recovery.
+  let surrenderedCount = 0;
+  for (const worker of workersToEvaluate) {
+    if (worker.safeToCancel && worker.abortedCleanly && !activeWorkers.has(worker.taskId)) {
+      worker.isSurrendered = true;
+      const surrendered = await surrenderTaskLease(worker.taskId, {
+        workerId: worker.workerId,
+        generation: worker.generation,
+        reason: 'Worker drained cleanly during shutdown',
+      }).catch((err) => {
+        console.warn(`[TASK EXECUTOR] Failed to surrender lease for task ${worker.taskId}:`, err.message);
+        return null;
+      });
+      if (surrendered) surrenderedCount++;
+    } else if (worker.safeToCancel && !settledInTime) {
+      console.log(`[TASK EXECUTOR] Task ${worker.taskId} execution did not settle within drain window; leaving in running state for lease recovery.`);
+    }
+  }
+
+  return {
+    drained: activeWorkers.size === 0 && settledInTime,
+    activeCount: activeWorkers.size,
+    surrenderedCount,
+  };
+}
+
+function pauseTaskClaims() {
+  isTaskClaimsPaused = true;
+  return isTaskClaimsPaused;
+}
+
+function resumeTaskClaims() {
+  isTaskClaimsPaused = false;
+  return isTaskClaimsPaused;
+}
+
+function areTaskClaimsPaused() {
+  return isTaskClaimsPaused;
+}
+
+function getActiveWorkersCount() {
+  return activeWorkers.size;
+}
+
+function getActiveWorkers() {
+  return Array.from(activeWorkers.values()).map((w) => ({
+    taskId: w.taskId,
+    workerId: w.workerId,
+    generation: w.generation,
+    safeToCancel: w.safeToCancel,
+    isSurrendered: Boolean(w.isSurrendered),
+  }));
+}
+
+function _resetWorkerStateForTesting() {
+  isTaskClaimsPaused = false;
+  activeWorkers.clear();
 }
 
 module.exports = {
@@ -744,4 +974,12 @@ module.exports = {
   DEFAULT_TASK_TIMEOUT_MS,
   HEARTBEAT_INTERVAL_MS,
   LEASE_DURATION_MS,
+  surrenderTaskLease,
+  drainActiveWorkers,
+  pauseTaskClaims,
+  resumeTaskClaims,
+  areTaskClaimsPaused,
+  getActiveWorkersCount,
+  getActiveWorkers,
+  _resetWorkerStateForTesting,
 };
