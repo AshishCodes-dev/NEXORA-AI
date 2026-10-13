@@ -17,24 +17,40 @@ router.use(authMiddleware);
 /**
  * Helper to format Mission document cleanly without leaking internal MongoDB metadata
  */
-const formatMission = (doc) => ({
-  id: doc._id.toString(),
-  objective: doc.objective,
-  status: doc.status,
-  createdAt: doc.createdAt ? doc.createdAt.toISOString() : new Date().toISOString(),
-  userId: doc.userId ? doc.userId.toString() : null
-});
+const formatMission = (doc) => {
+  if (!doc) return null;
+  const id = doc._id ? doc._id.toString() : (doc.id ? doc.id.toString() : null);
+  const createdAt = doc.createdAt instanceof Date
+    ? doc.createdAt.toISOString()
+    : (typeof doc.createdAt === 'string'
+      ? doc.createdAt
+      : (doc.createdAt ? new Date(doc.createdAt).toISOString() : new Date().toISOString()));
+  const userId = doc.userId
+    ? (doc.userId._id ? doc.userId._id.toString() : doc.userId.toString())
+    : null;
+  return {
+    id,
+    objective: doc.objective,
+    status: doc.status,
+    createdAt,
+    userId,
+  };
+};
 
 /**
  * Helper to format MissionTask document cleanly
  */
-const formatTask = (doc) => ({
-  id: doc._id.toString(),
-  title: doc.title,
-  description: doc.description,
-  status: doc.status,
-  order: doc.order
-});
+const formatTask = (doc) => {
+  if (!doc) return null;
+  const id = doc._id ? doc._id.toString() : (doc.id ? doc.id.toString() : null);
+  return {
+    id,
+    title: doc.title,
+    description: doc.description,
+    status: doc.status,
+    order: doc.order,
+  };
+};
 
 const MIN_OBJECTIVE_LENGTH = 3;
 const MAX_OBJECTIVE_LENGTH = 2000;
@@ -214,7 +230,10 @@ router.post('/:missionId/cancel', async (req, res) => {
       });
     }
 
-    const cancelReason = req.body?.reason || 'Mission cancelled by user';
+    let cancelReason = 'Mission cancelled by user';
+    if (typeof req.body?.reason === 'string' && req.body.reason.trim()) {
+      cancelReason = req.body.reason.trim().slice(0, 500);
+    }
     const result = await cancelMission(missionId, {
       userId: req.user.id,
       reason: cancelReason,

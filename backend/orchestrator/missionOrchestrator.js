@@ -267,7 +267,7 @@ async function executeMission(missionId, options = {}) {
       }
 
       const taskStage = mapTaskToStage(nextTask);
-      recordStageTransition(missionId, { stage: taskStage, status: 'started' }).catch(() => {});
+      await recordStageTransition(missionId, { stage: taskStage, status: 'started' }).catch(() => {});
 
       const remainingForTaskMs = deadlineMs - Date.now();
       if (remainingForTaskMs <= 0) {
@@ -289,7 +289,7 @@ async function executeMission(missionId, options = {}) {
       try {
         executed = await executeMissionTask(nextTask._id, taskOptions);
         executedTasks.push(executed);
-        recordStageTransition(missionId, { stage: taskStage, status: 'completed' }).catch(() => {});
+        await recordStageTransition(missionId, { stage: taskStage, status: 'completed' }).catch(() => {});
       } catch (taskError) {
         if (taskError.code === 'TASK_CLAIM_CONFLICT' || taskError instanceof TaskClaimConflictError) {
           console.log(`[MISSION ORCHESTRATOR] Task ${nextTask._id} claim conflict encountered (${taskError.message}). Yielding loop cleanly.`);

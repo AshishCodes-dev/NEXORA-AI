@@ -202,7 +202,7 @@ async function recordStageTransition(missionId, { stage, status = 'started', met
       doc.completedAt = now;
       doc.totalDurationMs = Math.max(0, now.getTime() - new Date(doc.startedAt).getTime());
       doc.metrics.totalDurationMs = doc.totalDurationMs;
-    } else {
+    } else if (doc.status !== 'completed' && doc.status !== 'failed') {
       doc.status = 'running';
     }
 
