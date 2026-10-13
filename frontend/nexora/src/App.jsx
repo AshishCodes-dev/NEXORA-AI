@@ -12,7 +12,21 @@ import MissionComposer from './components/MissionComposer';
 import ExecutionFeed from './components/ExecutionFeed';
 import EvidenceStream from './components/EvidenceStream';
 import demoExecutionEngine from './services/demoExecutionEngine';
-import { getMissionResult, MissionResultError } from './services/missionResultService';
+import {
+  API_BASE_URL,
+  createMission,
+  cancelMission,
+  retryTask,
+  getMissionEvents,
+  getMissionResult,
+  checkBackendHealth,
+  formatTelemetryEvent,
+  mapEventToAgent,
+  mapEventToSystemState,
+  deriveEvidenceUpdate,
+  MissionApiError,
+  MissionResultError,
+} from './services/missionService';
 import { INITIAL_EVIDENCE_MAP } from './constants/executionEvents';
 import { MISSION_STATES, STATE_CONFIG, STATE_ORDER } from './constants/missionStates';
 import { staggerContainer, staggerItem, fadeIn } from './motion/variants';
@@ -47,13 +61,15 @@ function Dashboard() {
   const currentConfig = STATE_CONFIG[systemState] || STATE_CONFIG[MISSION_STATES.IDLE];
   const coreState = currentConfig.coreState;
 
-  // Cleanup demo timer and simulation engine on unmount
+  // Cleanup demo timer, telemetry stream, and result polling on unmount
   useEffect(() => {
     return () => {
       demoExecutionEngine.stop();
       if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
       if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
       if (abortControllerRef.current) abortControllerRef.current.abort();
+      if (eventsTimerRef.current) clearTimeout(eventsTimerRef.current);
+      if (eventsAbortControllerRef.current) eventsAbortControllerRef.current.abort();
     };
   }, []);
 
@@ -97,6 +113,15 @@ function Dashboard() {
   const activeMissionIdRef = useRef(null);
   const abortControllerRef = useRef(null);
 
+  // Real Backend Telemetry Stream State (Phase 2.9)
+  const [isStreamingEvents, setIsStreamingEvents] = useState(false);
+  const eventsTimerRef = useRef(null);
+  const isFetchingEventsRef = useRef(false);
+  const eventsAbortControllerRef = useRef(null);
+  const eventsSeqRef = useRef(0);
+  const seenEventIdsRef = useRef(new Set());
+  const consecutiveEventErrorsRef = useRef(0);
+
   // Synchronize active mission ID ref
   useEffect(() => {
     activeMissionIdRef.current = currentMissionId;
@@ -107,9 +132,15 @@ function Dashboard() {
     if (!isAuthenticated) {
       if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
       if (abortControllerRef.current) abortControllerRef.current.abort();
+      if (eventsTimerRef.current) clearTimeout(eventsTimerRef.current);
+      if (eventsAbortControllerRef.current) eventsAbortControllerRef.current.abort();
       isFetchingRef.current = false;
+      isFetchingEventsRef.current = false;
       activeMissionIdRef.current = null;
+      eventsSeqRef.current = 0;
+      seenEventIdsRef.current.clear();
       setIsPolling(false);
+      setIsStreamingEvents(false);
       setResultLoading(false);
       setCurrentMissionId(null);
       setMissionResult(null);
@@ -182,15 +213,17 @@ function Dashboard() {
         const isTerminal =
           missionStatus === 'completed' ||
           missionStatus === 'failed' ||
+          missionStatus === 'cancelled' ||
           isReady ||
           ['verified', 'needs_revision', 'failed'].includes(verificationStatus);
 
         if (isTerminal) {
           setIsPolling(false);
+          setIsStreamingEvents(false);
           demoExecutionEngine.stop();
           if (missionStatus === 'completed' || isReady || ['verified', 'needs_revision'].includes(verificationStatus)) {
             setSystemState(MISSION_STATES.COMPLETE);
-          } else if (missionStatus === 'failed' || verificationStatus === 'failed') {
+          } else if (missionStatus === 'failed' || missionStatus === 'cancelled' || verificationStatus === 'failed') {
             setSystemState(MISSION_STATES.IDLE);
           }
           return;
@@ -239,12 +272,160 @@ function Dashboard() {
     };
   }, [currentMissionId, isPolling, isAuthenticated]);
 
-  // Execution Telemetry & Evidence Streams (Step 5)
+  // Execution Telemetry & Evidence Streams (Step 5 & Phase 2.9)
   const [executionEvents, setExecutionEvents] = useState([]);
   const [evidenceMap, setEvidenceMap] = useState(INITIAL_EVIDENCE_MAP);
   const [isSimulating, setIsSimulating] = useState(false);
   const [activeAgentId, setActiveAgentId] = useState(null);
   const [activeSecondaryAgentId, setActiveSecondaryAgentId] = useState(null);
+
+  // Real Backend Telemetry Events Polling Effect (Phase 2.9)
+  useEffect(() => {
+    if (!currentMissionId || !isAuthenticated || !isStreamingEvents) {
+      return;
+    }
+
+    let isMounted = true;
+    consecutiveEventErrorsRef.current = 0;
+
+    const pollTelemetry = async () => {
+      // Guard against overlapping requests
+      if (isFetchingEventsRef.current) return;
+      if (!isMounted || activeMissionIdRef.current !== currentMissionId) return;
+
+      isFetchingEventsRef.current = true;
+      const controller = new AbortController();
+      eventsAbortControllerRef.current = controller;
+
+      try {
+        const data = await getMissionEvents(currentMissionId, {
+          sinceSeq: eventsSeqRef.current,
+          limit: 50,
+          signal: controller.signal,
+        });
+
+        // Guard against race conditions after mission switch
+        if (!isMounted || activeMissionIdRef.current !== currentMissionId) {
+          return;
+        }
+
+        consecutiveEventErrorsRef.current = 0;
+
+        if (data?.events && Array.isArray(data.events) && data.events.length > 0) {
+          const newUiEvents = [];
+          let highestSeq = eventsSeqRef.current;
+
+          for (const rawEvt of data.events) {
+            const evtId = rawEvt.id || (rawEvt._id ? String(rawEvt._id) : null);
+            const evtSeq = typeof rawEvt.seq === 'number' ? rawEvt.seq : null;
+
+            // Deduplicate by event id and sequence number
+            const dedupKey = evtId || (evtSeq !== null ? `seq-${evtSeq}` : null);
+            if (dedupKey && seenEventIdsRef.current.has(dedupKey)) {
+              continue;
+            }
+            if (dedupKey) {
+              seenEventIdsRef.current.add(dedupKey);
+            }
+
+            if (evtSeq !== null && evtSeq > highestSeq) {
+              highestSeq = evtSeq;
+            }
+
+            // Transform raw backend event into formatted technical UI event
+            const uiEvent = formatTelemetryEvent(rawEvt, false);
+            newUiEvents.push(uiEvent);
+
+            // Synchronize active agent & system state
+            if (uiEvent.systemState) {
+              setSystemState(MISSION_STATES[uiEvent.systemState] || uiEvent.systemState);
+            }
+            if (uiEvent.activeAgentId) {
+              setActiveAgentId(uiEvent.activeAgentId);
+            }
+
+            // Synchronize evidence card update if applicable
+            const evidenceUpdate = deriveEvidenceUpdate(rawEvt);
+            if (evidenceUpdate) {
+              setEvidenceMap((prev) => ({
+                ...prev,
+                [evidenceUpdate.category]: {
+                  ...prev[evidenceUpdate.category],
+                  status: evidenceUpdate.status,
+                  placeholder: evidenceUpdate.placeholder,
+                  timeString: evidenceUpdate.timeString,
+                  lastUpdated: rawEvt.createdAt || new Date().toISOString(),
+                },
+              }));
+            }
+          }
+
+          // Advance sequence cursor strictly according to verified backend semantics
+          if (typeof data.nextSeq === 'number' && data.nextSeq > highestSeq) {
+            eventsSeqRef.current = data.nextSeq;
+          } else if (highestSeq > eventsSeqRef.current) {
+            eventsSeqRef.current = highestSeq;
+          }
+
+          if (newUiEvents.length > 0) {
+            setExecutionEvents((prev) => [...prev, ...newUiEvents]);
+          }
+        }
+
+        // Check if mission reached terminal state to conclude telemetry streaming
+        const isTerminal =
+          missionResult?.mission?.status === 'completed' ||
+          missionResult?.mission?.status === 'failed' ||
+          missionResult?.resultStatus?.ready === true ||
+          ['verified', 'needs_revision', 'failed'].includes(missionResult?.status);
+
+        if (isTerminal) {
+          setIsStreamingEvents(false);
+          setActiveAgentId(null);
+          setActiveSecondaryAgentId(null);
+          return;
+        }
+
+        // Schedule next telemetry poll (1.5s interval for smooth streaming)
+        if (isMounted && activeMissionIdRef.current === currentMissionId) {
+          eventsTimerRef.current = setTimeout(pollTelemetry, 1500);
+        }
+      } catch (err) {
+        if (!isMounted || activeMissionIdRef.current !== currentMissionId) {
+          return;
+        }
+
+        if (err.name === 'AbortError') {
+          return;
+        }
+
+        // Stop polling on terminal auth or not-found errors
+        const status = err?.status ?? err?.statusCode;
+        if (status === 401 || status === 404) {
+          setIsStreamingEvents(false);
+          return;
+        }
+
+        // Bounded exponential backoff for recoverable network errors (1.5s -> 3s, max 5s)
+        consecutiveEventErrorsRef.current += 1;
+        const backoffMs = Math.min(1500 * Math.pow(1.5, consecutiveEventErrorsRef.current), 5000);
+        if (isMounted && activeMissionIdRef.current === currentMissionId) {
+          eventsTimerRef.current = setTimeout(pollTelemetry, backoffMs);
+        }
+      } finally {
+        isFetchingEventsRef.current = false;
+      }
+    };
+
+    pollTelemetry();
+
+    return () => {
+      isMounted = false;
+      if (eventsTimerRef.current) clearTimeout(eventsTimerRef.current);
+      if (eventsAbortControllerRef.current) eventsAbortControllerRef.current.abort();
+      isFetchingEventsRef.current = false;
+    };
+  }, [currentMissionId, isStreamingEvents, isAuthenticated, missionResult?.mission?.status, missionResult?.resultStatus?.ready, missionResult?.status]);
 
   // Preserve working frontend-backend health check functionality
   const [backendHealth, setBackendHealth] = useState(null);
@@ -255,11 +436,7 @@ function Dashboard() {
     const checkBackend = async () => {
       try {
         setBackendLoading(true);
-        const response = await fetch('http://localhost:5000/api/health');
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-        const data = await response.json();
+        const data = await checkBackendHealth();
         setBackendHealth(data);
         setBackendConnected(true);
       } catch (err) {
@@ -277,8 +454,8 @@ function Dashboard() {
   const handleRunMission = async (e) => {
     if (e) e.preventDefault();
 
-    // Prevent duplicate submission while already processing or simulating (Task 13)
-    if (submissionState === 'processing' || isSimulating) return;
+    // Prevent duplicate submission while already processing or simulating
+    if (submissionState === 'processing' || isStreamingEvents) return;
 
     const trimmed = missionDirective.trim();
 
@@ -289,7 +466,7 @@ function Dashboard() {
       return;
     }
 
-    // Step 6B Auth Gate: Block unauthenticated operators from dispatching missions
+    // Auth Gate: Block unauthenticated operators from dispatching missions
     if (!isAuthenticated) {
       setSubmissionError('AUTHENTICATION_REQUIRED: Operator identity unverified. Directives require active authentication.');
       setSubmissionState('error');
@@ -309,32 +486,7 @@ function Dashboard() {
     setSystemState(MISSION_STATES.PLANNING);
 
     try {
-      const response = await fetch('http://localhost:5000/api/missions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        credentials: 'include',
-        body: JSON.stringify({ objective: trimmed }),
-      });
-
-      let data;
-      try {
-        data = await response.json();
-      } catch {
-        throw new Error(`Server returned unexpected non-JSON response (HTTP ${response.status})`);
-      }
-
-      if (!response.ok || !data || !data.success || !data.mission || typeof data.mission !== 'object' || !data.mission.id) {
-        const message =
-          data?.message ||
-          data?.error ||
-          (response.status === 401
-            ? 'Authentication required. Please log in.'
-            : `Server responded with status ${response.status}`);
-        throw new Error(message);
-      }
+      const data = await createMission({ objective: trimmed });
 
       setCreatedMission(data.mission);
       setCurrentMissionId(data.mission.id);
@@ -344,49 +496,27 @@ function Dashboard() {
       setResultLoading(true);
       setIsPolling(true);
       setSubmissionState('success');
-      setIsSimulating(true);
+      setIsSimulating(false);
+      setIsStreamingEvents(true);
 
-      // Reset previous telemetry logs before starting fresh run
+      // Reset previous telemetry logs before starting fresh real run
       setExecutionEvents([]);
       setEvidenceMap(INITIAL_EVIDENCE_MAP);
+      eventsSeqRef.current = 0;
+      seenEventIdsRef.current.clear();
+      consecutiveEventErrorsRef.current = 0;
 
-      // Start the deterministic demo execution sequence (Task 2, 7 & 11)
-      demoExecutionEngine.start(data.mission, {
-        onEvent: (event) => {
-          setExecutionEvents((prev) => [...prev, event]);
-        },
-        onStateChange: (newState, primaryAgent, secondaryAgent) => {
-          setSystemState(newState);
-          setActiveAgentId(primaryAgent);
-          setActiveSecondaryAgentId(secondaryAgent);
-        },
-        onEvidenceUpdate: (update) => {
-          setEvidenceMap((prev) => ({
-            ...prev,
-            [update.category]: {
-              ...prev[update.category],
-              status: update.status,
-              placeholder: update.placeholder,
-              timeString: update.timeString,
-              lastUpdated: update.timestamp,
-            },
-          }));
-        },
-        onComplete: () => {
-          setIsSimulating(false);
-          setActiveAgentId(null);
-          setActiveSecondaryAgentId(null);
-        },
-      });
+      // Real mission execution does NOT start demoExecutionEngine!
     } catch (err) {
       const errorMessage =
         err.message === 'Failed to fetch' || err.name === 'TypeError'
-          ? 'NEXORA backend unavailable on port 5000. Ensure server is running.'
+          ? 'NEXORA backend unavailable. Ensure server is running.'
           : err.message || 'Mission initialization failed. Please retry.';
       setSubmissionError(errorMessage);
       setSubmissionState('error');
       setSystemState(MISSION_STATES.IDLE);
       setIsSimulating(false);
+      setIsStreamingEvents(false);
       setIsPolling(false);
       setResultLoading(false);
       demoExecutionEngine.stop();
@@ -399,14 +529,20 @@ function Dashboard() {
     if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
     if (pollingTimerRef.current) clearTimeout(pollingTimerRef.current);
     if (abortControllerRef.current) abortControllerRef.current.abort();
+    if (eventsTimerRef.current) clearTimeout(eventsTimerRef.current);
+    if (eventsAbortControllerRef.current) eventsAbortControllerRef.current.abort();
     isFetchingRef.current = false;
+    isFetchingEventsRef.current = false;
     activeMissionIdRef.current = null;
+    eventsSeqRef.current = 0;
+    seenEventIdsRef.current.clear();
 
     setCurrentMissionId(null);
     setMissionResult(null);
     setResultLoading(false);
     setResultError(null);
     setIsPolling(false);
+    setIsStreamingEvents(false);
 
     setSubmissionState('idle');
     setMissionDirective('');
@@ -418,6 +554,76 @@ function Dashboard() {
     setIsSimulating(false);
     setActiveAgentId(null);
     setActiveSecondaryAgentId(null);
+  };
+
+  // Mission Lifecycle Controls (Phase 2.10)
+  const handleCancelMission = async (targetMissionId = currentMissionId) => {
+    if (!targetMissionId) return;
+    try {
+      const res = await cancelMission(targetMissionId, { reason: 'operator_abort' });
+      setIsPolling(false);
+      setIsStreamingEvents(false);
+      demoExecutionEngine.stop();
+      setSystemState(MISSION_STATES.IDLE);
+      setMissionResult((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          mission: {
+            ...prev.mission,
+            status: 'cancelled',
+          },
+        };
+      });
+      return res;
+    } catch (err) {
+      console.error('Failed to cancel mission:', err);
+      throw err;
+    }
+  };
+
+  const handleRetryTask = async (targetMissionId = currentMissionId, taskId) => {
+    if (!targetMissionId || !taskId) return;
+    try {
+      const res = await retryTask(targetMissionId, taskId);
+      // Immediately reflect pending task and running mission in UI
+      setMissionResult((prev) => {
+        if (!prev) return prev;
+        const updatedTasks = (prev.tasks || []).map((t) => {
+          if ((t.id || t._id) === taskId) {
+            return { ...t, status: 'pending', error: null };
+          }
+          return t;
+        });
+        return {
+          ...prev,
+          mission: {
+            ...prev.mission,
+            status: 'running',
+          },
+          tasks: updatedTasks,
+        };
+      });
+      // Resume polling and telemetry stream
+      setIsPolling(true);
+      setIsStreamingEvents(true);
+      setSystemState(MISSION_STATES.ANALYZING);
+      return res;
+    } catch (err) {
+      console.error('Failed to retry task:', err);
+      throw err;
+    }
+  };
+
+  const handleRefreshResult = async (targetMissionId = currentMissionId) => {
+    if (!targetMissionId) return;
+    try {
+      const res = await getMissionResult(targetMissionId);
+      if (res) setMissionResult(res);
+      return res;
+    } catch (err) {
+      // Ignore background refresh failure
+    }
   };
 
   // System Telemetry Metrics (Derived from systemState, Task 5)
@@ -718,6 +924,9 @@ function Dashboard() {
                 resultError={resultError}
                 onSubmit={handleRunMission}
                 onReset={handleResetMission}
+                onCancelMission={handleCancelMission}
+                onRetryTask={(mId, tId) => handleRetryTask(mId, tId)}
+                onRefreshResult={handleRefreshResult}
               />
             </div>
 
@@ -774,7 +983,7 @@ function Dashboard() {
                 <div className="lg:col-span-7">
                   <ExecutionFeed
                     events={executionEvents}
-                    isSimulating={isSimulating}
+                    isSimulating={isStreamingEvents || isSimulating}
                     isComplete={systemState === MISSION_STATES.COMPLETE}
                   />
                 </div>

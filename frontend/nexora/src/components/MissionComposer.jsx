@@ -48,6 +48,9 @@ export default function MissionComposer({
   resultError = null,
   onSubmit,
   onReset,
+  onCancelMission,
+  onRetryTask,
+  onRefreshResult,
 }) {
   const textareaRef = useRef(null);
   const [isFocused, setIsFocused] = useState(false);
@@ -86,6 +89,9 @@ export default function MissionComposer({
             resultError={resultError}
             createdMission={createdMission}
             onReset={onReset}
+            onCancelMission={onCancelMission}
+            onRetryTask={onRetryTask}
+            onRefreshResult={onRefreshResult}
           />
         ) : (
           /* ======================================================== */

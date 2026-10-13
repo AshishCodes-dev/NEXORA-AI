@@ -6,6 +6,7 @@ import EvidenceExplorer from './EvidenceExplorer';
 import AuditInspector from './AuditInspector';
 import { fadeIn, slideUp } from '../../motion/variants';
 import { springs } from '../../motion/transitions';
+import { cancelMission, retryTask } from '../../services/missionService';
 
 /**
  * MissionResultView
@@ -18,10 +19,17 @@ export default function MissionResultView({
   resultError = null,
   createdMission = null,
   onReset,
+  onCancelMission,
+  onRetryTask,
+  onRefreshResult,
 }) {
   const [activeTab, setActiveTab] = useState('deliverable');
   const [copiedId, setCopiedId] = useState(false);
   const [copiedJson, setCopiedJson] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [retryingTaskId, setRetryingTaskId] = useState(null);
+  const [actionError, setActionError] = useState(null);
+  const [actionSuccess, setActionSuccess] = useState(null);
 
   const missionId = createdMission?.id || missionResult?.mission?.id || '';
   const objective = missionResult?.mission?.objective || createdMission?.objective || '';
@@ -64,6 +72,15 @@ export default function MissionResultView({
   const getStatusBadge = () => {
     const isReady = resultStatus?.ready === true;
     const verification = resultStatus?.verification;
+
+    if (missionStatus === 'cancelled') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-bold uppercase bg-[rgba(239,68,68,0.12)] border border-[rgba(239,68,68,0.3)] text-[#F87171]">
+          <span className="h-1.5 w-1.5 rounded-full bg-[#EF4444]" />
+          CANCELLED // OPERATOR ABORTED
+        </span>
+      );
+    }
 
     if (missionStatus === 'failed' || verification === 'failed') {
       return (
@@ -110,6 +127,52 @@ export default function MissionResultView({
     );
   };
 
+  const isTerminal =
+    ['completed', 'failed', 'cancelled'].includes(missionStatus) ||
+    resultStatus?.ready === true ||
+    ['verified', 'needs_revision', 'failed'].includes(resultStatus?.verification);
+  const canCancel = !isTerminal && ['running', 'planning', 'queued', 'evaluating'].includes(missionStatus);
+
+  const handleCancelClick = async () => {
+    if (!missionId || isCancelling) return;
+    setIsCancelling(true);
+    setActionError(null);
+    try {
+      if (onCancelMission) {
+        await onCancelMission(missionId);
+      } else {
+        await cancelMission(missionId, { reason: 'operator_abort' });
+        if (onRefreshResult) await onRefreshResult();
+      }
+      setActionSuccess('Mission execution aborted by operator.');
+      setTimeout(() => setActionSuccess(null), 3500);
+    } catch (err) {
+      setActionError(err.message || 'Failed to abort mission.');
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
+  const handleRetryTaskClick = async (taskId) => {
+    if (!missionId || !taskId || retryingTaskId) return;
+    setRetryingTaskId(taskId);
+    setActionError(null);
+    try {
+      if (onRetryTask) {
+        await onRetryTask(missionId, taskId);
+      } else {
+        await retryTask(missionId, taskId);
+        if (onRefreshResult) await onRefreshResult();
+      }
+      setActionSuccess('Task queued for retry.');
+      setTimeout(() => setActionSuccess(null), 3500);
+    } catch (err) {
+      setActionError(err.message || 'Failed to retry task.');
+    } finally {
+      setRetryingTaskId(null);
+    }
+  };
+
   return (
     <motion.div
       key="mission-result"
@@ -146,8 +209,52 @@ export default function MissionResultView({
 
           <div className="flex items-center gap-2">
             {getStatusBadge()}
+            {canCancel && (
+              <button
+                type="button"
+                onClick={handleCancelClick}
+                disabled={isCancelling}
+                title="Abort mission execution"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-bold uppercase bg-[rgba(239,68,68,0.12)] border border-[rgba(239,68,68,0.35)] text-[#EF4444] hover:bg-[rgba(239,68,68,0.22)] hover:border-[#EF4444] transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-[#EF4444] animate-pulse" />
+                {isCancelling ? 'ABORTING...' : 'ABORT MISSION'}
+              </button>
+            )}
           </div>
         </div>
+
+        {/* Action Status Feedback */}
+        {actionError && (
+          <div className="rounded-lg bg-[rgba(239,68,68,0.08)] border border-[rgba(239,68,68,0.3)] p-2.5 mb-3 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-mono text-[#EF4444]">
+              <span className="font-bold">OPERATOR ACTION ERROR:</span>
+              <span>{actionError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActionError(null)}
+              className="text-[10px] font-mono text-[#EF4444] hover:underline cursor-pointer"
+            >
+              DISMISS
+            </button>
+          </div>
+        )}
+        {actionSuccess && (
+          <div className="rounded-lg bg-[rgba(57,255,136,0.08)] border border-[rgba(57,255,136,0.3)] p-2.5 mb-3 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-mono text-[#39FF88]">
+              <span className="font-bold">STATUS:</span>
+              <span>{actionSuccess}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActionSuccess(null)}
+              className="text-[10px] font-mono text-[#39FF88] hover:underline cursor-pointer"
+            >
+              DISMISS
+            </button>
+          </div>
+        )}
 
         {/* 2. Directive Banner */}
         <div className="rounded-lg bg-[#050508] border border-[rgba(168,85,247,0.12)] p-3 mb-4">
@@ -381,6 +488,20 @@ export default function MissionResultView({
                       }`}>
                         {task.status}
                       </span>
+                      {task.status === 'failed' && missionStatus !== 'cancelled' && (
+                        <button
+                          type="button"
+                          onClick={() => handleRetryTaskClick(task.id || task._id)}
+                          disabled={retryingTaskId === (task.id || task._id)}
+                          title="Retry failed task"
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase bg-[rgba(168,85,247,0.15)] border border-[rgba(168,85,247,0.35)] text-[#C084FC] hover:bg-[rgba(168,85,247,0.25)] hover:text-[#F5F1FA] transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          <svg className={`w-2.5 h-2.5 ${retryingTaskId === (task.id || task._id) ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                          </svg>
+                          {retryingTaskId === (task.id || task._id) ? 'RETRYING...' : 'RETRY'}
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))

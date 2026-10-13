@@ -23,9 +23,9 @@ const QUERY_LIMITS = {
  * @param {object} doc
  * @returns {object}
  */
-function formatEvent(doc) {
+function formatEvent(doc, seq = null) {
   if (!doc) return null;
-  return {
+  const formatted = {
     id: doc._id ? doc._id.toString() : null,
     missionId: doc.missionId ? doc.missionId.toString() : null,
     userId: doc.userId ? doc.userId.toString() : null,
@@ -38,8 +38,14 @@ function formatEvent(doc) {
     action: doc.action || null,
     outcome: doc.outcome || null,
     metadata: doc.metadata || null,
-    createdAt: doc.createdAt ? doc.createdAt.toISOString() : new Date().toISOString(),
+    createdAt: doc.createdAt ? (doc.createdAt instanceof Date ? doc.createdAt.toISOString() : new Date(doc.createdAt).toISOString()) : new Date().toISOString(),
   };
+
+  if (typeof seq === 'number') {
+    formatted.seq = seq;
+  }
+
+  return formatted;
 }
 
 /**
@@ -284,7 +290,15 @@ async function getMissionEvents(missionId, userId, options = {}) {
     Math.max(parseInt(options.limit, 10) || QUERY_LIMITS.DEFAULT_PAGE_SIZE, 1),
     QUERY_LIMITS.MAX_PAGE_SIZE
   );
-  const skip = Math.max(parseInt(options.skip, 10) || 0, 0);
+
+  let skip = Math.max(parseInt(options.skip, 10) || 0, 0);
+  const hasSinceSeq = options.sinceSeq !== undefined && options.sinceSeq !== null && options.sinceSeq !== '';
+  if (hasSinceSeq) {
+    const parsedSinceSeq = parseInt(options.sinceSeq, 10);
+    if (!isNaN(parsedSinceSeq) && parsedSinceSeq >= 0) {
+      skip = Math.max(skip, parsedSinceSeq);
+    }
+  }
 
   // 3. Execution: deterministic chronological sort (server timestamp ASC, _id ASC)
   const [events, total] = await Promise.all([
@@ -296,15 +310,25 @@ async function getMissionEvents(missionId, userId, options = {}) {
     MissionEvent.countDocuments(filter),
   ]);
 
-  return {
+  const formattedEvents = events.map((doc, idx) => formatEvent(doc, skip + idx + 1));
+  const nextSeq = skip + events.length;
+
+  const resultEnvelope = {
     success: true,
     missionId: mission._id.toString(),
     count: events.length,
     total,
     limit,
     skip,
-    events: events.map(formatEvent),
+    nextSeq,
+    events: formattedEvents,
   };
+
+  if (hasSinceSeq) {
+    resultEnvelope.sinceSeq = parseInt(options.sinceSeq, 10) || 0;
+  }
+
+  return resultEnvelope;
 }
 
 module.exports = {

@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const Mission = require('../models/Mission');
 const MissionTask = require('../models/MissionTask');
+const { MissionEvent } = require('../models/MissionEvent');
 const authMiddleware = require('../middleware/authMiddleware');
 const { createMissionExecutionPlan, executeMission, cancelMission } = require('../orchestrator/missionOrchestrator');
 const { getMissionResult } = require('../services/missionResultService');
@@ -262,6 +263,203 @@ router.post('/:missionId/cancel', async (req, res) => {
 });
 
 /**
+ * POST /api/missions/:missionId/tasks/:taskId/retry
+ * Retries an eligible failed task belonging to a mission owned by the authenticated user.
+ */
+router.post('/:missionId/tasks/:taskId/retry', async (req, res) => {
+  try {
+    const { missionId, taskId } = req.params;
+
+    if (!missionId || !mongoose.Types.ObjectId.isValid(missionId)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    if (!taskId || !mongoose.Types.ObjectId.isValid(taskId)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Task not found'
+      });
+    }
+
+    // Tenant isolation: verify mission ownership
+    const mission = await Mission.findOne({ _id: missionId, userId: req.user.id });
+    if (!mission) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    // Terminal guard: cannot retry tasks on cancelled or completed missions
+    const isCancelled = mission.status === 'cancelled' || await MissionEvent.exists({
+      missionId: mission._id,
+      $or: [
+        { type: EVENT_TYPES.MISSION_CANCELLED },
+        { type: EVENT_TYPES.MISSION_FAILED, 'metadata.cancelled': true },
+      ],
+    });
+    if (isCancelled) {
+      const msg = 'Cannot retry task on a cancelled mission.';
+      return res.status(400).json({
+        success: false,
+        error: msg,
+        message: msg,
+      });
+    }
+
+    if (mission.status === 'completed') {
+      const msg = 'Cannot retry task on a completed mission.';
+      return res.status(400).json({
+        success: false,
+        error: msg,
+        message: msg,
+      });
+    }
+
+    // Task verification
+    const task = await MissionTask.findOne({ _id: taskId, missionId: mission._id });
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        error: 'Task not found',
+        message: 'Task not found',
+      });
+    }
+
+    if (task.status === 'completed') {
+      const msg = 'Cannot retry an already completed task.';
+      return res.status(400).json({
+        success: false,
+        error: msg,
+        message: msg,
+      });
+    }
+
+    if (task.status === 'running') {
+      const msg = 'Task is currently running.';
+      return res.status(409).json({
+        success: false,
+        error: msg,
+        message: msg,
+      });
+    }
+
+    if (task.status === 'pending') {
+      const msg = 'Task is already pending execution.';
+      return res.status(400).json({
+        success: false,
+        error: msg,
+        message: msg,
+      });
+    }
+
+    // Only failed tasks are eligible
+    if (task.status !== 'failed') {
+      const msg = `Task in '${task.status}' state is not eligible for retry.`;
+      return res.status(400).json({
+        success: false,
+        error: msg,
+        message: msg,
+      });
+    }
+
+    // Check retry budget
+    const currentAttempt = task.executionMetadata?.attempt || 1;
+    const maxRetries = task.retryLimit || 3;
+    if (currentAttempt > maxRetries) {
+      const msg = `Task retry budget exhausted (${currentAttempt}/${maxRetries}).`;
+      return res.status(400).json({
+        success: false,
+        error: msg,
+        message: msg,
+      });
+    }
+
+    const nextAttempt = currentAttempt + 1;
+
+    // Safely construct updated executionMetadata object to avoid null path error
+    const rawMeta = task.executionMetadata;
+    const baseMeta = rawMeta && typeof rawMeta === 'object'
+      ? (typeof rawMeta.toObject === 'function' ? rawMeta.toObject() : { ...rawMeta })
+      : {};
+    const updatedMetadata = {
+      ...baseMeta,
+      attempt: nextAttempt,
+      lastRetryAt: new Date(),
+      isManualRetry: true,
+    };
+
+    // Atomic Compare-And-Set transition to re-queue task as pending
+    const updatedTask = await MissionTask.findOneAndUpdate(
+      { _id: task._id, status: 'failed' },
+      {
+        $set: {
+          status: 'pending',
+          workerId: null,
+          leaseExpiresAt: null,
+          error: null,
+          executionMetadata: updatedMetadata,
+        },
+        $inc: { generation: 1, retryCount: 1 },
+      },
+      { returnDocument: 'after' }
+    );
+
+    if (!updatedTask) {
+      return res.status(409).json({
+        success: false,
+        error: 'Task state changed concurrently; retry rejected.'
+      });
+    }
+
+    // If mission was marked failed due to this task, resume it to running
+    if (mission.status === 'failed') {
+      await Mission.updateOne(
+        { _id: mission._id, status: 'failed' },
+        { $set: { status: 'running' } }
+      );
+      mission.status = 'running';
+    }
+
+    // Record canonical retry lifecycle event
+    await recordEvent({
+      missionId: mission._id,
+      userId: req.user.id,
+      type: EVENT_TYPES.TASK_RETRY_STARTED,
+      taskId: task._id,
+      action: `Manual task retry initiated for attempt ${nextAttempt}`,
+      outcome: 'retrying',
+      metadata: { attempt: nextAttempt, manual: true },
+    }).catch((eventErr) => {
+      console.warn('[RETRY EVENT WARNING]', eventErr.message);
+    });
+
+    // Dispatch background worker execution to resume pipeline
+    setImmediate(() => {
+      executeMission(mission._id).catch((execErr) => {
+        console.error(`[RETRY ASYNC EXECUTION ERROR] Mission ${mission._id}:`, execErr.message);
+      });
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Task retry initiated successfully',
+      task: formatTask(updatedTask),
+      mission: formatMission(mission)
+    });
+  } catch (error) {
+    console.error('[TASK RETRY ROUTE ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to retry task.'
+    });
+  }
+});
+
+/**
  * POST /api/missions/:missionId/execute
  * Triggers or resumes execution of an existing mission belonging to the authenticated user
  */
@@ -465,10 +663,10 @@ router.get('/:missionId/state', async (req, res) => {
 router.get('/:missionId/events', async (req, res) => {
   try {
     const { missionId } = req.params;
-    const { limit, skip, type, decisionType } = req.query;
+    const { limit, skip, type, decisionType, sinceSeq } = req.query;
 
     // req.user.id is guaranteed by authMiddleware; query/body params are strictly ignored
-    const result = await getMissionEvents(missionId, req.user.id, { limit, skip, type, decisionType });
+    const result = await getMissionEvents(missionId, req.user.id, { limit, skip, type, decisionType, sinceSeq });
 
     if (result.notFound) {
       return res.status(404).json({

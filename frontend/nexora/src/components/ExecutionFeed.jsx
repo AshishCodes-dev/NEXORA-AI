@@ -62,7 +62,7 @@ export default function ExecutionFeed({
                 MISSION EXECUTION // LIVE
               </h2>
               <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#120B20] text-[#C084FC] border border-[rgba(168,85,247,0.2)]">
-                SIMULATED ORCHESTRATOR
+                {isSimulating ? 'LIVE TELEMETRY' : isComplete ? 'PIPELINE COMPLETE' : 'STANDBY ORCHESTRATOR'}
               </span>
             </div>
             <p className="text-[10px] font-mono text-[#756B7D]">
@@ -219,10 +219,10 @@ export default function ExecutionFeed({
                 isSimulating ? 'bg-[#39FF88]' : 'bg-[#554C5C]'
               }`}
             />
-            TRANSPORT: EVENT_STREAM
+            TRANSPORT: {isSimulating ? 'TELEMETRY POLLING' : 'EVENT STREAM'}
           </span>
           <span>•</span>
-          <span>LATENCY: &lt;1ms (IN-MEM)</span>
+          <span>LATENCY: &lt;50ms (LOCAL)</span>
         </div>
         <div className="text-[#756B7D]">
           SECURITY: DETERMINISTIC PIPELINE

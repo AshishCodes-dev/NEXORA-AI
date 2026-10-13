@@ -1,0 +1,21 @@
+{
+  "name": "nexora-ai-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NEXORA AI — Autonomous Multi-Agent Mission OS",
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "build": "npm run build --prefix frontend/nexora",
+    "build:frontend": "npm run build --prefix frontend/nexora",
+    "test": "node backend/scratch/run_phase2_regressions.js",
+    "test:backend": "node backend/scratch/run_phase2_regressions.js"
+  },
+  "keywords": [
+    "nexora",
+    "autonomous-agents",
+    "mission-os",
+    "ai-orchestration"
+  ],
+  "author": "NEXORA Team",
+  "license": "UNLICENSED"
+}
