@@ -182,7 +182,6 @@ async function executeMission(missionId, options = {}) {
   // 3. Load associated tasks to verify initial presence
   const initialTasks = await MissionTask.find({ missionId }).sort({ order: 1 });
   if (!initialTasks || initialTasks.length === 0) {
-    await Mission.findByIdAndUpdate(missionId, { $set: { status: 'failed' } });
     throw new Error(`No tasks found for mission ${missionId}`);
   }
 
@@ -235,16 +234,35 @@ async function executeMission(missionId, options = {}) {
 
       if (failedPriorTask) {
         console.log(`[MISSION ORCHESTRATOR] Mission ${missionId} cannot dispatch task ${nextTask._id} (order ${nextTask.order}): prior task ${failedPriorTask._id} (order ${failedPriorTask.order}) is in failed state.`);
+        const failureReason = `Prerequisite task order ${failedPriorTask.order} (${failedPriorTask.title || 'task'}) failed; halting pipeline.`;
         const failedMission = await Mission.findOneAndUpdate(
           { _id: missionId, status: 'running' },
           { $set: { status: 'failed' } },
           { returnDocument: 'after' }
-        ) || await Mission.findById(missionId);
+        );
+        if (failedMission) {
+          await recordStageTransition(missionId, { stage: 'failed', status: 'failed', metadata: { error: failureReason } }).catch(() => {});
+          await computeMissionMetrics(missionId).catch(() => {});
+          await recordDecision({
+            missionId,
+            decisionType: DECISION_TYPES.BLOCK_MISSION,
+            reason: failureReason,
+            action: 'Halt mission execution pipeline',
+            outcome: 'failed',
+          }).catch(() => {});
+          await recordEvent({
+            missionId,
+            type: EVENT_TYPES.MISSION_FAILED,
+            reason: failureReason,
+            action: 'Mark mission status as failed',
+            outcome: 'failed',
+          }).catch(() => {});
+        }
         return {
-          mission: failedMission,
+          mission: failedMission || await Mission.findById(missionId),
           tasks: executedTasks,
           failed: true,
-          error: `Prerequisite task order ${failedPriorTask.order} (${failedPriorTask.title || 'task'}) failed; halting pipeline.`,
+          error: failureReason,
         };
       }
 
@@ -330,16 +348,35 @@ async function executeMission(missionId, options = {}) {
     const failedTask = await MissionTask.findOne({ missionId, status: 'failed' });
     if (failedTask) {
       console.log(`[MISSION ORCHESTRATOR] Mission ${missionId} cannot complete: task ${failedTask._id} (order ${failedTask.order}) is in failed status.`);
+      const failureReason = `Mission contains failed task order ${failedTask.order} (${failedTask.title || 'task'}); cannot mark completed.`;
       const failedMission = await Mission.findOneAndUpdate(
         { _id: missionId, status: 'running' },
         { $set: { status: 'failed' } },
         { returnDocument: 'after' }
-      ) || await Mission.findById(missionId);
+      );
+      if (failedMission) {
+        await recordStageTransition(missionId, { stage: 'failed', status: 'failed', metadata: { error: failureReason } }).catch(() => {});
+        await computeMissionMetrics(missionId).catch(() => {});
+        await recordDecision({
+          missionId,
+          decisionType: DECISION_TYPES.BLOCK_MISSION,
+          reason: failureReason,
+          action: 'Halt mission execution pipeline',
+          outcome: 'failed',
+        }).catch(() => {});
+        await recordEvent({
+          missionId,
+          type: EVENT_TYPES.MISSION_FAILED,
+          reason: failureReason,
+          action: 'Mark mission status as failed',
+          outcome: 'failed',
+        }).catch(() => {});
+      }
       return {
-        mission: failedMission,
+        mission: failedMission || await Mission.findById(missionId),
         tasks: executedTasks,
         failed: true,
-        error: `Mission contains failed task order ${failedTask.order} (${failedTask.title || 'task'}); cannot mark completed.`,
+        error: failureReason,
       };
     }
 
@@ -449,9 +486,123 @@ async function executeMission(missionId, options = {}) {
   }
 }
 
+/**
+ * Safely cancels a mission and halts its execution pipeline.
+ *
+ * Guarantees:
+ * 1. Atomic CAS transition: status from ['planning', 'queued', 'running'] -> 'failed'.
+ * 2. Idempotent: if already 'completed' or 'failed', returns current document without mutating.
+ * 3. In-flight abort: aborts active task workers specifically for this mission.
+ * 4. Task reconciliation: cancels remaining pending/queued tasks atomically.
+ * 5. Telemetry & Events: records stage transition, terminal failure event, blocking decision, and computes metrics.
+ *
+ * @param {mongoose.Types.ObjectId|string} missionId
+ * @param {object} [options={}]
+ * @param {string} [options.reason='Mission cancelled by user']
+ * @param {string} [options.userId] - Optional user verification
+ * @returns {Promise<{mission: object, cancelled: boolean, alreadyTerminal?: boolean, notFound?: boolean, status?: string}>}
+ */
+async function cancelMission(missionId, options = {}) {
+  if (!missionId || !mongoose.Types.ObjectId.isValid(missionId)) {
+    throw new Error('Invalid or missing missionId');
+  }
+
+  const cancelReason = options.reason || 'Mission cancelled by user';
+
+  const query = { _id: missionId };
+  if (options.userId) {
+    query.userId = options.userId;
+  }
+  const existing = await Mission.findOne(query);
+  if (!existing) {
+    return { notFound: true };
+  }
+
+  if (existing.status === 'completed' || existing.status === 'failed') {
+    return {
+      mission: existing,
+      cancelled: false,
+      alreadyTerminal: true,
+      status: existing.status,
+    };
+  }
+
+  const updateQuery = {
+    _id: missionId,
+    status: { $in: ['planning', 'queued', 'running'] },
+  };
+  if (options.userId) {
+    updateQuery.userId = options.userId;
+  }
+
+  const cancelledMission = await Mission.findOneAndUpdate(
+    updateQuery,
+    {
+      $set: {
+        status: 'failed',
+      },
+    },
+    { returnDocument: 'after' }
+  );
+
+  if (!cancelledMission) {
+    const current = await Mission.findById(missionId);
+    return {
+      mission: current,
+      cancelled: false,
+      alreadyTerminal: true,
+      status: current?.status,
+    };
+  }
+
+  // Abort active workers for this mission
+  const { abortMissionWorkers } = require('./taskExecutor');
+  await abortMissionWorkers(missionId, { timeoutMs: options.drainTimeoutMs || 3000 }).catch(() => {});
+
+  // Cancel remaining pending/queued tasks
+  await MissionTask.updateMany(
+    { missionId, status: { $in: ['pending', 'queued'] } },
+    { $set: { status: 'failed', error: cancelReason } }
+  ).catch(() => {});
+
+  // Telemetry & Events
+  await recordStageTransition(missionId, {
+    stage: 'failed',
+    status: 'failed',
+    metadata: { error: cancelReason, cancelled: true },
+  }).catch(() => {});
+
+  await computeMissionMetrics(missionId).catch(() => {});
+
+  await recordDecision({
+    missionId,
+    decisionType: DECISION_TYPES.BLOCK_MISSION,
+    reason: cancelReason,
+    action: 'Cancel and halt mission pipeline',
+    outcome: 'failed',
+  }).catch(() => {});
+
+  await recordEvent({
+    missionId,
+    userId: cancelledMission.userId,
+    type: EVENT_TYPES.MISSION_FAILED,
+    reason: cancelReason,
+    action: 'Mark mission status as failed (cancelled)',
+    outcome: 'failed',
+    metadata: { cancelled: true },
+  }).catch(() => {});
+
+  return {
+    mission: cancelledMission,
+    cancelled: true,
+    status: 'failed',
+  };
+}
+
 module.exports = {
   createMissionExecutionPlan,
   executeMission,
+  cancelMission,
   resolveMissionTimeout,
   DEFAULT_MISSION_TIMEOUT_MS,
   MIN_MISSION_TIMEOUT_MS,

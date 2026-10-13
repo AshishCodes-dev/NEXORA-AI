@@ -1,8 +1,9 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const Mission = require('../models/Mission');
+const MissionTask = require('../models/MissionTask');
 const authMiddleware = require('../middleware/authMiddleware');
-const { createMissionExecutionPlan, executeMission } = require('../orchestrator/missionOrchestrator');
+const { createMissionExecutionPlan, executeMission, cancelMission } = require('../orchestrator/missionOrchestrator');
 const { getMissionResult } = require('../services/missionResultService');
 const { getMissionState } = require('../services/missionStateService');
 const { getMissionEvents, recordEvent, EVENT_TYPES } = require('../services/missionEventService');
@@ -157,6 +158,157 @@ router.get('/', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: 'Failed to retrieve persisted missions.'
+    });
+  }
+});
+
+/**
+ * GET /api/missions/:missionId
+ * Retrieves detailed mission document and task hierarchy for the authenticated user
+ */
+router.get('/:missionId', async (req, res) => {
+  try {
+    const { missionId } = req.params;
+    if (!missionId || !mongoose.Types.ObjectId.isValid(missionId)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    const mission = await Mission.findOne({ _id: missionId, userId: req.user.id });
+    if (!mission) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    const tasks = await MissionTask.find({ missionId }).sort({ order: 1 });
+
+    return res.status(200).json({
+      success: true,
+      mission: formatMission(mission),
+      tasks: tasks.map(formatTask)
+    });
+  } catch (error) {
+    console.error('[MISSIONS ROUTE ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve mission.'
+    });
+  }
+});
+
+/**
+ * POST /api/missions/:missionId/cancel
+ * Safely cancels a mission and aborts in-flight tasks belonging to the authenticated user
+ */
+router.post('/:missionId/cancel', async (req, res) => {
+  try {
+    const { missionId } = req.params;
+    if (!missionId || !mongoose.Types.ObjectId.isValid(missionId)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    const cancelReason = req.body?.reason || 'Mission cancelled by user';
+    const result = await cancelMission(missionId, {
+      userId: req.user.id,
+      reason: cancelReason,
+    });
+
+    if (result.notFound) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: result.cancelled ? 'Mission cancelled successfully' : 'Mission is already terminal',
+      cancelled: Boolean(result.cancelled),
+      mission: formatMission(result.mission)
+    });
+  } catch (error) {
+    console.error('[MISSION CANCEL ROUTE ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to cancel mission.'
+    });
+  }
+});
+
+/**
+ * POST /api/missions/:missionId/execute
+ * Triggers or resumes execution of an existing mission belonging to the authenticated user
+ */
+router.post('/:missionId/execute', async (req, res) => {
+  try {
+    const { missionId } = req.params;
+    if (!missionId || !mongoose.Types.ObjectId.isValid(missionId)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    const mission = await Mission.findOne({ _id: missionId, userId: req.user.id });
+    if (!mission) {
+      return res.status(404).json({
+        success: false,
+        error: 'Mission not found'
+      });
+    }
+
+    if (mission.status === 'completed') {
+      return res.status(200).json({
+        success: true,
+        message: 'Mission already completed',
+        status: 'completed',
+        mission: formatMission(mission)
+      });
+    }
+
+    if (mission.status === 'failed') {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot execute a failed mission. Create a new mission or retry.',
+        status: 'failed',
+        mission: formatMission(mission)
+      });
+    }
+
+    if (req.query.sync === 'true') {
+      const execResult = await executeMission(missionId);
+      return res.status(200).json({
+        success: true,
+        message: 'Mission execution completed',
+        status: execResult.mission?.status || 'completed',
+        mission: formatMission(execResult.mission || mission)
+      });
+    }
+
+    setImmediate(() => {
+      executeMission(mission._id).catch((execErr) => {
+        console.error(`[ASYNC MISSION EXECUTION ERROR] Mission ${mission._id}:`, execErr.message);
+      });
+    });
+
+    return res.status(202).json({
+      success: true,
+      message: 'Mission execution dispatched',
+      status: mission.status === 'planning' ? 'running' : mission.status,
+      mission: formatMission(mission)
+    });
+  } catch (error) {
+    console.error('[MISSION EXECUTE ROUTE ERROR]', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to execute mission.'
     });
   }
 });

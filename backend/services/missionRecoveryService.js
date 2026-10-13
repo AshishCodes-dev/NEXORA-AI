@@ -272,6 +272,161 @@ async function reconcileStaleTasks(options = {}) {
 }
 
 /**
+ * Reconciles pending and queued tasks belonging to terminal failed missions,
+ * including missions interrupted during cancellation.
+ *
+ * Safety invariants:
+ * 1. Only tasks with status 'pending' or 'queued' are eligible.
+ * 2. Never modifies completed tasks (status: 'completed' tasks are untouched).
+ * 3. Never overwrites active/running task ownership (status: 'running' tasks are untouched
+ *    by this rule; their lifecycle is governed by worker fencing and lease expiry).
+ * 4. Checks that the parent mission is in terminal 'failed' status before mutating.
+ * 5. Uses atomic conditional findOneAndUpdate CAS matching _id and status: { $in: ['pending', 'queued'] }
+ *    to ensure single-winner idempotency and prevent races with concurrent worker claims.
+ * 6. Records canonical TASK_FAILED events for reconciled tasks.
+ * 7. Idempotent: safe to run repeatedly across periodic sweeps with zero duplicate mutations or events.
+ * 8. Outage-aware: genuine database outages are re-thrown; per-task errors are logged without halting the sweep.
+ *
+ * @param {object} [options={}]
+ * @param {mongoose.Types.ObjectId|string} [options.missionId] - Optional scope to specific mission
+ * @returns {Promise<{reconciledToFailed: number, reconciledCount: number, skippedActive: number, errors: number}>}
+ */
+async function reconcileTerminalMissionTasks(options = {}) {
+  const stats = {
+    reconciledToFailed: 0,
+    reconciledCount: 0,
+    skippedActive: 0,
+    errors: 0,
+  };
+
+  const taskQuery = {
+    status: { $in: ['pending', 'queued'] },
+  };
+  if (options.missionId) {
+    taskQuery.missionId = options.missionId;
+  }
+
+  let candidateTasks;
+  try {
+    candidateTasks = await MissionTask.find(taskQuery);
+  } catch (err) {
+    if (isDatabaseOutage(err)) throw err;
+    console.error('[MISSION RECOVERY] Error querying pending/queued tasks:', err.message);
+    stats.errors++;
+    return stats;
+  }
+
+  if (!candidateTasks || candidateTasks.length === 0) {
+    if (options.missionId) {
+      try {
+        const runningCount = await MissionTask.countDocuments({
+          missionId: options.missionId,
+          status: 'running',
+        });
+        stats.skippedActive = runningCount;
+      } catch (err) {
+        if (isDatabaseOutage(err)) throw err;
+      }
+    }
+    return stats;
+  }
+
+  // Find distinct candidate mission IDs
+  const candidateMissionIds = [...new Set(candidateTasks.map((t) => t.missionId.toString()))];
+
+  let failedMissions;
+  try {
+    failedMissions = await Mission.find({
+      _id: { $in: candidateMissionIds },
+      status: 'failed',
+    }).select('_id');
+  } catch (err) {
+    if (isDatabaseOutage(err)) throw err;
+    console.error('[MISSION RECOVERY] Error querying failed missions for terminal tasks:', err.message);
+    stats.errors++;
+    return stats;
+  }
+
+  const failedMissionIdSet = new Set(failedMissions.map((m) => m._id.toString()));
+
+  // Count active running tasks belonging to failed missions to report skippedActive
+  if (failedMissionIdSet.size > 0) {
+    try {
+      const runningCount = await MissionTask.countDocuments({
+        missionId: { $in: Array.from(failedMissionIdSet) },
+        status: 'running',
+      });
+      stats.skippedActive = runningCount;
+    } catch (err) {
+      if (isDatabaseOutage(err)) throw err;
+    }
+  }
+
+  for (const task of candidateTasks) {
+    if (stopRequested && isPeriodicSweepRunning) {
+      console.log('[MISSION RECOVERY] Stop requested; aborting terminal mission tasks sweep.');
+      break;
+    }
+
+    // Only process tasks whose parent mission is confirmed to be in terminal 'failed' status
+    if (!failedMissionIdSet.has(task.missionId.toString())) {
+      continue;
+    }
+
+    try {
+      // Test hook: injected error for error isolation testing
+      if (typeof options.__injectedTerminalTaskError === 'function') {
+        await options.__injectedTerminalTaskError(task);
+      }
+
+      // Atomic status CAS: ensure status is STILL 'pending' or 'queued'
+      // If a concurrent worker claimed this task (status changed to 'running') or completed it,
+      // this CAS matches 0 documents and leaves worker ownership untouched.
+      const reconciled = await MissionTask.findOneAndUpdate(
+        {
+          _id: task._id,
+          status: { $in: ['pending', 'queued'] },
+        },
+        {
+          $set: {
+            status: 'failed',
+            error: 'Mission is in terminal failed state; task reconciled during recovery.',
+          },
+        },
+        { returnDocument: 'after' }
+      );
+
+      if (reconciled) {
+        stats.reconciledToFailed++;
+        stats.reconciledCount++;
+
+        await recordEvent({
+          missionId: task.missionId,
+          taskId: task._id,
+          type: EVENT_TYPES.TASK_FAILED,
+          reason: 'Mission is in terminal failed state; task reconciled during recovery.',
+          action: 'Reconcile orphaned pending task under terminal failed mission',
+          outcome: 'failed',
+          metadata: {
+            recovery: true,
+            terminalMissionRecovery: true,
+            previousStatus: task.status,
+          },
+        }).catch(() => {});
+      }
+    } catch (taskErr) {
+      if (isDatabaseOutage(taskErr)) {
+        throw taskErr;
+      }
+      stats.errors++;
+      console.error(`[MISSION RECOVERY] Recoverable error reconciling terminal mission task ${task._id}:`, taskErr.message);
+    }
+  }
+
+  return stats;
+}
+
+/**
  * Reconciles abandoned running missions.
  *
  * Safety invariants:
@@ -467,7 +622,7 @@ async function reconcileAbandonedMissions(options = {}) {
  *
  * @param {object} [options={}]
  * @param {number} [options.timeoutMs=10000] - Maximum duration in ms before timing out
- * @returns {Promise<{tasks: object, missions: object}>}
+ * @returns {Promise<{tasks: object, terminalTasks?: object, missions: object}>}
  */
 async function runStartupRecovery(options = {}) {
   const timeoutMs = options.timeoutMs !== undefined ? options.timeoutMs : 10000;
@@ -477,11 +632,15 @@ async function runStartupRecovery(options = {}) {
     const taskStats = await reconcileStaleTasks(options);
     console.log(`[STARTUP RECOVERY] Stale tasks: ${taskStats.reclaimedToPending} reclaimed to pending, ${taskStats.failedExhausted} failed (exhausted), ${taskStats.invalidFailed || 0} invalid failed, ${taskStats.skippedActive} active skipped.`);
 
+    const terminalStats = await reconcileTerminalMissionTasks(options);
+    console.log(`[STARTUP RECOVERY] Terminal mission tasks: ${terminalStats.reconciledToFailed} reconciled to failed, ${terminalStats.skippedActive} active skipped.`);
+
     const missionStats = await reconcileAbandonedMissions(options);
     console.log(`[STARTUP RECOVERY] Abandoned missions: ${missionStats.failedExpired} expired, ${missionStats.failedInvalidDeadline} invalid deadline, ${missionStats.resumed} resumed, ${missionStats.skippedActive} active skipped.`);
 
     return {
       tasks: taskStats,
+      terminalTasks: terminalStats,
       missions: missionStats,
     };
   };
@@ -555,8 +714,10 @@ function startPeriodicRecovery(options = {}) {
         const recoveryOpts = options.recoveryOptions || {};
         const taskStats = await reconcileStaleTasks(recoveryOpts);
         if (stopRequested) return { tasks: taskStats, missions: { resumed: 0 } };
+        const terminalStats = await reconcileTerminalMissionTasks(recoveryOpts);
+        if (stopRequested) return { tasks: taskStats, terminalTasks: terminalStats, missions: { resumed: 0 } };
         const missionStats = await reconcileAbandonedMissions(recoveryOpts);
-        return { tasks: taskStats, missions: missionStats };
+        return { tasks: taskStats, terminalTasks: terminalStats, missions: missionStats };
       })();
       await currentSweepPromise;
     } catch (sweepErr) {
@@ -643,6 +804,7 @@ function getPeriodicRecoveryState() {
 module.exports = {
   reconcileStaleTasks,
   reconcileAbandonedMissions,
+  reconcileTerminalMissionTasks,
   runStartupRecovery,
   startPeriodicRecovery,
   stopPeriodicRecovery,

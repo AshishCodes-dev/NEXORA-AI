@@ -308,6 +308,7 @@ async function executeMissionTask(taskId, options = {}) {
 
   const workerRecord = {
     taskId: taskId.toString(),
+    missionId: runningTask.missionId ? runningTask.missionId.toString() : null,
     workerId,
     generation: currentGeneration,
     abortController,
@@ -952,11 +953,76 @@ function getActiveWorkersCount() {
 function getActiveWorkers() {
   return Array.from(activeWorkers.values()).map((w) => ({
     taskId: w.taskId,
+    missionId: w.missionId || null,
     workerId: w.workerId,
     generation: w.generation,
     safeToCancel: w.safeToCancel,
     isSurrendered: Boolean(w.isSurrendered),
   }));
+}
+
+/**
+ * Aborts all active in-flight workers belonging to a specific mission.
+ * Unlike cluster-level drain, this does NOT pause task claims globally.
+ * It sends abort signals to workers matching missionId, and awaits their
+ * settlement within a bounded window.
+ *
+ * @param {mongoose.Types.ObjectId|string} missionId
+ * @param {object} [options={}]
+ * @param {number} [options.timeoutMs=3000]
+ * @returns {Promise<{abortedCount: number, settledCount: number}>}
+ */
+async function abortMissionWorkers(missionId, options = {}) {
+  if (!missionId) {
+    return { abortedCount: 0, settledCount: 0 };
+  }
+  const targetMissionId = missionId.toString();
+  const timeoutMs = (typeof options.timeoutMs === 'number' && options.timeoutMs >= 0)
+    ? options.timeoutMs
+    : 3000;
+
+  const matchingWorkers = Array.from(activeWorkers.values()).filter(
+    (w) => w.missionId === targetMissionId
+  );
+
+  if (matchingWorkers.length === 0) {
+    return { abortedCount: 0, settledCount: 0 };
+  }
+
+  const executionPromises = [];
+  for (const worker of matchingWorkers) {
+    if (worker.abortController) {
+      worker.abortController.abort();
+    }
+    if (worker.executionPromise) {
+      executionPromises.push(worker.executionPromise.catch(() => {}));
+    }
+  }
+
+  let settledInTime = true;
+  if (executionPromises.length > 0 && timeoutMs > 0) {
+    let timer;
+    const timeoutPromise = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        settledInTime = false;
+        resolve();
+      }, timeoutMs);
+    });
+
+    try {
+      await Promise.race([
+        Promise.all(executionPromises),
+        timeoutPromise,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  return {
+    abortedCount: matchingWorkers.length,
+    settledCount: settledInTime ? matchingWorkers.length : 0,
+  };
 }
 
 function _resetWorkerStateForTesting() {
@@ -976,6 +1042,7 @@ module.exports = {
   LEASE_DURATION_MS,
   surrenderTaskLease,
   drainActiveWorkers,
+  abortMissionWorkers,
   pauseTaskClaims,
   resumeTaskClaims,
   areTaskClaimsPaused,
