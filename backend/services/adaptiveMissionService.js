@@ -322,6 +322,20 @@ async function evaluateTaskFailure({
       });
     }
 
+    // Verify parent mission is still active ('running') before requeueing task
+    const activeMission = await Mission.findOne({
+      _id: missionObjectId,
+      status: 'running',
+    });
+    if (!activeMission) {
+      const blockReason = `Mission ${missionObjectId} is no longer running; adaptive retry aborted.`;
+      return {
+        action: 'BLOCK',
+        decisionType: DECISION_TYPES.BLOCK_MISSION,
+        reason: blockReason,
+      };
+    }
+
     // Atomically reset task state to 'pending' with incremented attempt
     const requeuedTask = await MissionTask.findOneAndUpdate(
       casFilter,

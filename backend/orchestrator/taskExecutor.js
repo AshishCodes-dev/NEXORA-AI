@@ -461,6 +461,11 @@ async function executeMissionTask(taskId, options = {}) {
     const durationMs = Date.now() - taskStartTime;
 
     // Check if worker was aborted or lease was lost while work was running
+    if (abortController.signal.aborted) {
+      const abortErr = new Error(`Task ${taskId} execution aborted`);
+      abortErr.code = 'TASK_ABORTED';
+      throw abortErr;
+    }
     if (leaseStatus === 'LOST' || leaseStatus === 'EXPIRED_UNCERTAIN') {
       workerState = WORKER_STATES.FENCED_LOST;
       throw new LeaseLostError(taskId, currentGeneration, workerId, leaseStatus);
@@ -476,6 +481,11 @@ async function executeMissionTask(taskId, options = {}) {
         generation: currentGeneration,
         workerId,
       });
+      if (abortController.signal.aborted) {
+        const abortErr = new Error(`Task ${taskId} execution aborted during pre-completion barrier`);
+        abortErr.code = 'TASK_ABORTED';
+        throw abortErr;
+      }
       if (leaseStatus === 'LOST' || leaseStatus === 'EXPIRED_UNCERTAIN') {
         workerState = WORKER_STATES.FENCED_LOST;
         throw new LeaseLostError(taskId, currentGeneration, workerId, leaseStatus);

@@ -317,6 +317,20 @@ async function executeMission(missionId, options = {}) {
         });
 
         if (adaptiveDecision.action === 'RETRY') {
+          // Re-verify that mission is still running before continuing orchestrator loop
+          const activeMissionCheck = await Mission.findOne({
+            _id: missionId,
+            status: 'running',
+          });
+          if (!activeMissionCheck) {
+            console.log(`[MISSION ORCHESTRATOR] Mission ${missionId} is no longer running; halting adaptive retry loop.`);
+            return {
+              mission: await Mission.findById(missionId),
+              tasks: executedTasks,
+              failed: true,
+              error: `Mission ${missionId} was cancelled or terminated during adaptive retry evaluation.`,
+            };
+          }
           // Re-queued as 'pending' for adaptive retry; continue orchestrator loop
           continue;
         }
@@ -344,40 +358,68 @@ async function executeMission(missionId, options = {}) {
       }
     }
 
-    // Verify mission integrity before completion: cannot mark completed if any task failed
-    const failedTask = await MissionTask.findOne({ missionId, status: 'failed' });
-    if (failedTask) {
-      console.log(`[MISSION ORCHESTRATOR] Mission ${missionId} cannot complete: task ${failedTask._id} (order ${failedTask.order}) is in failed status.`);
-      const failureReason = `Mission contains failed task order ${failedTask.order} (${failedTask.title || 'task'}); cannot mark completed.`;
-      const failedMission = await Mission.findOneAndUpdate(
-        { _id: missionId, status: 'running' },
-        { $set: { status: 'failed' } },
-        { returnDocument: 'after' }
-      );
-      if (failedMission) {
-        await recordStageTransition(missionId, { stage: 'failed', status: 'failed', metadata: { error: failureReason } }).catch(() => {});
-        await computeMissionMetrics(missionId).catch(() => {});
-        await recordDecision({
-          missionId,
-          decisionType: DECISION_TYPES.BLOCK_MISSION,
-          reason: failureReason,
-          action: 'Halt mission execution pipeline',
-          outcome: 'failed',
-        }).catch(() => {});
-        await recordEvent({
-          missionId,
-          type: EVENT_TYPES.MISSION_FAILED,
-          reason: failureReason,
-          action: 'Mark mission status as failed',
-          outcome: 'failed',
-        }).catch(() => {});
+    // Verify mission integrity before completion: cannot mark completed if any task failed or is incomplete
+    const incompleteTask = await MissionTask.findOne({
+      missionId,
+      status: { $ne: 'completed' },
+    }).sort({ order: 1 });
+
+    if (incompleteTask) {
+      if (incompleteTask.status === 'failed') {
+        console.log(`[MISSION ORCHESTRATOR] Mission ${missionId} cannot complete: task ${incompleteTask._id} (order ${incompleteTask.order}) is in failed status.`);
+        const failureReason = `Mission contains failed task order ${incompleteTask.order} (${incompleteTask.title || 'task'}); cannot mark completed.`;
+        const failedMission = await Mission.findOneAndUpdate(
+          { _id: missionId, status: 'running' },
+          { $set: { status: 'failed' } },
+          { returnDocument: 'after' }
+        );
+        if (failedMission) {
+          await recordStageTransition(missionId, { stage: 'failed', status: 'failed', metadata: { error: failureReason } }).catch(() => {});
+          await computeMissionMetrics(missionId).catch(() => {});
+          await recordDecision({
+            missionId,
+            decisionType: DECISION_TYPES.BLOCK_MISSION,
+            reason: failureReason,
+            action: 'Halt mission execution pipeline',
+            outcome: 'failed',
+          }).catch(() => {});
+          await recordEvent({
+            missionId,
+            type: EVENT_TYPES.MISSION_FAILED,
+            reason: failureReason,
+            action: 'Mark mission status as failed',
+            outcome: 'failed',
+          }).catch(() => {});
+        }
+        return {
+          mission: failedMission || await Mission.findById(missionId),
+          tasks: executedTasks,
+          failed: true,
+          error: failureReason,
+        };
       }
+
+      if (incompleteTask.status === 'running' || incompleteTask.status === 'queued') {
+        console.log(`[MISSION ORCHESTRATOR] Mission ${missionId} cannot complete: task ${incompleteTask._id} (order ${incompleteTask.order}) is in '${incompleteTask.status}' status. Yielding loop cleanly.`);
+        return {
+          mission: await Mission.findById(missionId),
+          tasks: executedTasks,
+          alreadyActive: true,
+          activeTaskId: incompleteTask._id,
+        };
+      }
+
+      console.log(`[MISSION ORCHESTRATOR] Mission ${missionId} cannot complete: task ${incompleteTask._id} (order ${incompleteTask.order}) is in '${incompleteTask.status}' status. Yielding loop cleanly.`);
       return {
-        mission: failedMission || await Mission.findById(missionId),
+        mission: await Mission.findById(missionId),
         tasks: executedTasks,
-        failed: true,
-        error: failureReason,
+        pendingTaskId: incompleteTask._id,
       };
+    }
+
+    // Test hook: controlled barrier before mission completion CAS
+    if (typeof options.__barrierBeforeMissionCompletion === 'function') {
+      await options.__barrierBeforeMissionCompletion({ missionId });
     }
 
     // 5. Transition mission: running -> completed (atomic conditional update for idempotent terminal transition)
