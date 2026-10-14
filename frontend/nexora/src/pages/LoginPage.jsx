@@ -18,7 +18,7 @@ import { useAuth } from '../context/AuthContext';
  */
 export default function LoginPage() {
   const prefersReducedMotion = useReducedMotion();
-  const { login } = useAuth();
+  const { login, loginWithGoogle } = useAuth();
   const { navigate } = useRouter();
 
   // Form State
@@ -115,6 +115,24 @@ export default function LoginPage() {
     }
   };
 
+  const handleGoogleSuccess = async (credential) => {
+    try {
+      setUiState('loading');
+      setFormError(null);
+      await loginWithGoogle(credential);
+      setUiState('success');
+      navigate('/');
+    } catch (err) {
+      setFormError(err.message || 'Google authentication failed.');
+      setUiState('error');
+    }
+  };
+
+  const handleGoogleError = (err) => {
+    setFormError(err.message || 'Google sign-in encountered an issue.');
+    setUiState('error');
+  };
+
   return (
     <AuthLayout systemSubtitle="SYSTEM ACCESS // SECURE CHANNEL">
       <AuthPanel>
@@ -125,10 +143,12 @@ export default function LoginPage() {
           subtitle="Authenticate operator identity to open autonomous mission channels."
         />
 
-        {/* Google OAuth (UI Only at Step 6A/6B) */}
+        {/* Google OAuth */}
         <div className="mb-5">
           <GoogleAuthButton
             disabled={uiState === 'loading'}
+            onSuccess={handleGoogleSuccess}
+            onError={handleGoogleError}
             text="CONTINUE WITH GOOGLE"
           />
         </div>

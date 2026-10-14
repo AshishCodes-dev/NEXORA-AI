@@ -131,6 +131,44 @@ export function AuthProvider({ children }) {
     return data.user;
   }, []);
 
+  // Google login handler
+  const loginWithGoogle = useCallback(async (credential) => {
+    let response;
+    try {
+      response = await fetch(`${BACKEND_URL}/api/auth/google`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({ credential }),
+      });
+    } catch (networkErr) {
+      throw new Error('NEXORA authentication gateway unreachable. Ensure backend server is running on port 5000.');
+    }
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error(`Server returned unexpected response (HTTP ${response.status})`);
+    }
+
+    if (!response.ok || !data?.success) {
+      const message =
+        data?.message ||
+        (response.status === 401
+          ? 'Invalid or expired Google credential token'
+          : `Google authentication failed (HTTP ${response.status})`);
+      throw new Error(message);
+    }
+
+    setUser(data.user);
+    setIsAuthenticated(true);
+    return data.user;
+  }, []);
+
   // Logout handler
   const logout = useCallback(async () => {
     try {
@@ -157,6 +195,7 @@ export function AuthProvider({ children }) {
     signup,
     logout,
     refreshSession,
+    loginWithGoogle,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

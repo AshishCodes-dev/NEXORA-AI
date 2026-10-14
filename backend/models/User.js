@@ -24,6 +24,14 @@ const userSchema = new mongoose.Schema(
       required: true,
       default: 'local',
     },
+    googleId: {
+      type: String,
+      default: null,
+      index: {
+        unique: true,
+        partialFilterExpression: { googleId: { $type: 'string' } },
+      },
+    },
     firebaseUid: {
       type: String,
       default: null,

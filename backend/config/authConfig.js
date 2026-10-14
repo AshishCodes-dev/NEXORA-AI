@@ -118,6 +118,20 @@ function getCookieOptions(env = process.env) {
   };
 }
 
+/**
+ * Resolves the configured Google OAuth Client ID.
+ * Returns null if unconfigured.
+ *
+ * @param {object} [env=process.env]
+ * @returns {string|null}
+ */
+function getGoogleClientId(env = process.env) {
+  if (typeof env.GOOGLE_CLIENT_ID === 'string' && env.GOOGLE_CLIENT_ID.trim()) {
+    return env.GOOGLE_CLIENT_ID.trim();
+  }
+  return null;
+}
+
 module.exports = {
   COOKIE_NAME,
   INSECURE_DEFAULT_SECRET,
@@ -127,4 +141,5 @@ module.exports = {
   validateAuthConfig,
   isProductionConfigured,
   getCookieOptions,
+  getGoogleClientId,
 };

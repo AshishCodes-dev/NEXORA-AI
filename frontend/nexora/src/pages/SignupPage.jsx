@@ -18,7 +18,7 @@ import { useAuth } from '../context/AuthContext';
  */
 export default function SignupPage() {
   const prefersReducedMotion = useReducedMotion();
-  const { signup } = useAuth();
+  const { signup, loginWithGoogle } = useAuth();
   const { navigate } = useRouter();
 
   // Form State
@@ -141,6 +141,24 @@ export default function SignupPage() {
     }
   };
 
+  const handleGoogleSuccess = async (credential) => {
+    try {
+      setUiState('loading');
+      setFormError(null);
+      await loginWithGoogle(credential);
+      setUiState('success');
+      navigate('/');
+    } catch (err) {
+      setFormError(err.message || 'Google registration failed.');
+      setUiState('error');
+    }
+  };
+
+  const handleGoogleError = (err) => {
+    setFormError(err.message || 'Google sign-in encountered an issue.');
+    setUiState('error');
+  };
+
   return (
     <AuthLayout systemSubtitle="OPERATOR REGISTRATION // ENCLAVE ACCESS">
       <AuthPanel>
@@ -151,10 +169,12 @@ export default function SignupPage() {
           subtitle="Register credentials to deploy autonomous AI agents and manage directives."
         />
 
-        {/* Google OAuth (UI Only at Step 6A/6B) */}
+        {/* Google OAuth */}
         <div className="mb-5">
           <GoogleAuthButton
             disabled={uiState === 'loading'}
+            onSuccess={handleGoogleSuccess}
+            onError={handleGoogleError}
             text="CONTINUE WITH GOOGLE"
           />
         </div>
