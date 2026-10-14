@@ -1,10 +1,11 @@
-import { useRef, useState } from 'react';
+import { useRef, useState, lazy, Suspense } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
 import TechnicalLabel from './TechnicalLabel';
 import { MISSION_STATES } from '../constants/missionStates';
 import { fadeIn } from '../motion/variants';
 import { springs } from '../motion/transitions';
-import MissionResultView from './result/MissionResultView';
+
+const MissionResultView = lazy(() => import('./result/MissionResultView'));
 
 const DIRECTIVE_SUGGESTIONS = [
   {
@@ -83,16 +84,25 @@ export default function MissionComposer({
     >
       <AnimatePresence mode="wait">
         {submissionState === 'success' && createdMission ? (
-          <MissionResultView
-            missionResult={missionResult}
-            resultLoading={resultLoading}
-            resultError={resultError}
-            createdMission={createdMission}
-            onReset={onReset}
-            onCancelMission={onCancelMission}
-            onRetryTask={onRetryTask}
-            onRefreshResult={onRefreshResult}
-          />
+          <Suspense
+            fallback={
+              <div className="flex-1 flex flex-col items-center justify-center p-12 text-center font-mono">
+                <div className="w-8 h-8 rounded-full border-2 border-purple-500/20 border-t-purple-400 animate-spin mb-4" />
+                <span className="text-xs text-purple-300/70 tracking-widest">LOADING MISSION RESULT CONSOLE...</span>
+              </div>
+            }
+          >
+            <MissionResultView
+              missionResult={missionResult}
+              resultLoading={resultLoading}
+              resultError={resultError}
+              createdMission={createdMission}
+              onReset={onReset}
+              onCancelMission={onCancelMission}
+              onRetryTask={onRetryTask}
+              onRefreshResult={onRefreshResult}
+            />
+          </Suspense>
         ) : (
           /* ======================================================== */
           /* COMMAND CONSOLE VIEW (Tasks 2, 3, 4, 5, 6, 7 & 8)         */

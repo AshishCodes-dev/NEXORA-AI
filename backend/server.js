@@ -5,6 +5,7 @@ const cookieParser = require('cookie-parser');
 const mongoose = require('mongoose');
 const connectDB = require('./config/db');
 const { validateAuthConfig } = require('./config/authConfig');
+const { createCorsMiddleware, createHelmetMiddleware, validateSecurityConfig } = require('./config/securityConfig');
 const { notFoundHandler, centralErrorHandler } = require('./middleware/errorHandler');
 const missionsRouter = require('./routes/missions');
 const authRouter = require('./routes/authRoutes');
@@ -35,26 +36,23 @@ if (fs.existsSync(envPath)) {
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Express reverse-proxy trust configuration
+const trustProxyEnv = process.env.TRUST_PROXY;
+if (trustProxyEnv === 'true' || trustProxyEnv === '1') {
+  app.set('trust proxy', 1);
+} else if (trustProxyEnv) {
+  app.set('trust proxy', trustProxyEnv);
+}
+
+// Security headers via Helmet (HSTS in production HTTPS, safe CSP, nosniff, frame denial)
+app.use(createHelmetMiddleware());
+
 // Middleware with 100kb request body limit for production safety
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
 
-// CORS configuration restricted to development frontend origin
-const ALLOWED_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173'];
-
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (!origin || ALLOWED_ORIGINS.includes(origin)) {
-    res.header('Access-Control-Allow-Origin', origin || 'http://localhost:5173');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-    res.header('Access-Control-Allow-Credentials', 'true');
-  }
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
-});
+// Configurable credentialed CORS
+app.use(createCorsMiddleware());
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -196,6 +194,7 @@ process.on('uncaughtException', (error) => {
 async function startServer() {
   try {
     validateAuthConfig();
+    validateSecurityConfig();
     await connectDB();
 
     // NEXORA Phase 2.3: Startup Crash Recovery & Stale Worker Reconciliation

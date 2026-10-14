@@ -3,14 +3,13 @@ import { springs } from '../../motion/transitions';
 
 /**
  * GoogleAuthButton
- * UI-only presentation for Google OAuth authentication at Step 6A.
- * Structured to integrate cleanly with Firebase/Google OAuth in subsequent steps
- * without requiring layout or styling refactors.
+ * Explicitly designated UI entry point for Google OAuth.
+ * Marked as (COMING SOON) and disabled pending full Google OAuth provider integration in Phase 3.2.
  */
 export default function GoogleAuthButton({
   onClick,
-  disabled = false,
-  text = 'CONTINUE WITH GOOGLE',
+  disabled = true,
+  text = 'CONTINUE WITH GOOGLE (COMING SOON)',
   className = '',
 }) {
   const prefersReducedMotion = useReducedMotion();
@@ -21,8 +20,8 @@ export default function GoogleAuthButton({
     if (onClick) {
       onClick();
     } else {
-      // Non-intrusive reminder in development console
-      console.info('[NEXORA AUTH] Google OAuth entry point primed (Firebase integration scheduled for subsequent phase)');
+      // Non-misleading advisory in console
+      console.info('[NEXORA AUTH] Google OAuth provider integration is scheduled for an upcoming release. Please use Email/Password authentication.');
     }
   };
 
@@ -31,13 +30,19 @@ export default function GoogleAuthButton({
       type="button"
       onClick={handleClick}
       disabled={disabled}
+      aria-disabled={disabled}
+      title={disabled ? 'Google authentication is scheduled for an upcoming release. Please sign in with email and password.' : undefined}
       whileHover={disabled || prefersReducedMotion ? {} : { scale: 1.012 }}
       whileTap={disabled || prefersReducedMotion ? {} : { scale: 0.988 }}
       transition={springs.tactile}
-      className={`w-full relative flex items-center justify-center gap-3 px-4 py-2.5 rounded-lg bg-[#090710] border border-[rgba(168,85,247,0.18)] text-xs sm:text-sm font-mono font-medium text-[#E9D5FF] shadow-[0_4px_16px_rgba(0,0,0,0.4)] hover:bg-[#0E0D14] hover:border-[rgba(192,132,252,0.45)] hover:text-[#F5F1FA] hover:shadow-[0_0_18px_rgba(168,85,247,0.15)] transition-colors duration-200 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed min-h-[42px] ${className}`}
+      className={`w-full relative flex items-center justify-center gap-3 px-4 py-2.5 rounded-lg bg-[#090710] border border-[rgba(168,85,247,0.18)] text-xs sm:text-sm font-mono font-medium text-[#A8A29E] shadow-[0_4px_16px_rgba(0,0,0,0.4)] transition-colors duration-200 min-h-[42px] ${
+        disabled
+          ? 'opacity-60 cursor-not-allowed border-[rgba(168,85,247,0.1)] hover:bg-[#090710] hover:text-[#A8A29E]'
+          : 'cursor-pointer hover:bg-[#0E0D14] hover:border-[rgba(192,132,252,0.45)] hover:text-[#F5F1FA]'
+      } ${className}`}
     >
       {/* Official Google G Logo SVG */}
-      <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+      <svg className="w-4 h-4 shrink-0 opacity-75" viewBox="0 0 24 24" aria-hidden="true">
         <path
           fill="#4285F4"
           d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"

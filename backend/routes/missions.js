@@ -9,6 +9,7 @@ const { getMissionResult } = require('../services/missionResultService');
 const { getMissionState } = require('../services/missionStateService');
 const { getMissionEvents, recordEvent, EVENT_TYPES } = require('../services/missionEventService');
 const { recordMissionCreated, getMissionTelemetry, getMissionMetrics } = require('../services/telemetry/telemetryService');
+const { missionRateLimiter } = require('../middleware/rateLimiter');
 
 const router = express.Router();
 
@@ -61,7 +62,7 @@ const MAX_OBJECTIVE_LENGTH = 2000;
  * Creates and persists a new mission belonging to the authenticated user,
  * then generates the deterministic task decomposition plan.
  */
-router.post('/', async (req, res) => {
+router.post('/', missionRateLimiter, async (req, res) => {
   const { objective } = req.body || {};
 
   // Validation: objective must exist and be a string

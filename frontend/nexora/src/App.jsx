@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { motion, AnimatePresence, MotionConfig } from 'motion/react';
 import Sidebar from './components/Sidebar';
 import Topbar from './components/Topbar';
@@ -33,8 +33,9 @@ import { staggerContainer, staggerItem, fadeIn } from './motion/variants';
 import { springs } from './motion/transitions';
 import { RouterProvider, useRouter } from './router/RouterContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import LoginPage from './pages/LoginPage';
-import SignupPage from './pages/SignupPage';
+
+const LoginPage = lazy(() => import('./pages/LoginPage'));
+const SignupPage = lazy(() => import('./pages/SignupPage'));
 
 function Dashboard() {
   const { isAuthenticated } = useAuth();
@@ -1030,16 +1031,33 @@ function Dashboard() {
  * - /signup -> SignupPage
  * - default -> Autonomous Mission Control Dashboard
  */
+function RouteLoadingFallback({ label = 'INITIALIZING SYSTEM PORTAL...' }) {
+  return (
+    <div className="min-h-screen w-full bg-[#030206] text-[#E9D5FF] flex flex-col items-center justify-center font-mono">
+      <div className="w-8 h-8 rounded-full border-2 border-purple-500/20 border-t-purple-400 animate-spin mb-4" />
+      <div className="text-xs tracking-widest text-purple-300/70">{label}</div>
+    </div>
+  );
+}
+
 function MainRouter() {
   const { currentPath } = useRouter();
   const normalized = (currentPath || '/').toLowerCase().replace(/\/+$/, '') || '/';
 
   if (normalized === '/login') {
-    return <LoginPage />;
+    return (
+      <Suspense fallback={<RouteLoadingFallback label="INITIALIZING AUTHENTICATION GATEWAY..." />}>
+        <LoginPage />
+      </Suspense>
+    );
   }
 
   if (normalized === '/signup') {
-    return <SignupPage />;
+    return (
+      <Suspense fallback={<RouteLoadingFallback label="INITIALIZING REGISTRATION PORTAL..." />}>
+        <SignupPage />
+      </Suspense>
+    );
   }
 
   return <Dashboard />;

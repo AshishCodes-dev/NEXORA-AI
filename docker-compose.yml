@@ -1,0 +1,58 @@
+# ==============================================================================
+# NEXORA AI — Production Staging & Local Integration Compose
+# ==============================================================================
+# Defines local multi-container topology:
+# - MongoDB 7.0 database with persistent storage and admin health check
+# - NEXORA Backend with Playwright headless Chromium and Express API
+# ==============================================================================
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: nexora-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_DATABASE: nexora
+    volumes:
+      - nexora_mongo_data:/data/db
+    ports:
+      - "127.0.0.1:27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: nexora-backend
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      MONGODB_URI: mongodb://mongodb:27017/nexora
+      JWT_SECRET: ${JWT_SECRET:-nexora_staging_jwt_secret_min_32_characters_long!}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      TRUST_PROXY: "1"
+      MISSION_RATE_LIMIT_WINDOW_MS: ${MISSION_RATE_LIMIT_WINDOW_MS:-900000}
+      MISSION_RATE_LIMIT_MAX: ${MISSION_RATE_LIMIT_MAX:-15}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    ports:
+      - "5000:5000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  nexora_mongo_data:
+    name: nexora_mongo_data
