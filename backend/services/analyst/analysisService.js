@@ -224,15 +224,22 @@ function buildDeterministicAnalysis(evidenceDocs, task, evidenceIntelligence = n
     const docId = doc._id;
     const sourceTitle = doc.sourceTitle || 'External Source';
     const claim = (doc.claim || '').trim();
+    const evidenceText = (doc.evidenceText || '').trim();
 
-    const statement = claim.length > 0
-      ? `Evidence from source "${sourceTitle}" indicates: ${claim}`
-      : `Evidence retrieved from "${sourceTitle}" provides reference context for ${task.title}.`;
+    let statement = '';
+    if (evidenceText.length > 20) {
+      const excerpt = evidenceText.slice(0, 140).trim();
+      statement = `Verified evidence from "${sourceTitle}" indicates: ${excerpt}`;
+    } else if (claim.length > 0) {
+      statement = `Evidence from source "${sourceTitle}" indicates: ${claim}`;
+    } else {
+      statement = `Evidence retrieved from "${sourceTitle}" provides reference context for ${task.title}.`;
+    }
 
     findings.push({
       statement: statement.slice(0, LIMITS.MAX_STATEMENT_LENGTH),
       supportingEvidenceIds: [docId],
-      confidence: 'high',
+      confidence: 'medium',
     });
   }
 

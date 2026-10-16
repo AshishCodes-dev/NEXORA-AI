@@ -802,7 +802,7 @@ function Dashboard() {
             backendConnected={backendConnected}
           />
 
-          <MotionPage className="flex-1 p-4 sm:p-6 lg:p-8 flex flex-col gap-6 max-w-7xl w-full mx-auto">
+          <MotionPage className="flex-1 p-3 sm:p-6 lg:p-8 flex flex-col gap-5 sm:gap-6 max-w-7xl w-full mx-auto">
             {/* ============================================================ */}
             {/* 4. SYSTEM TELEMETRY HUD STRIP                               */}
             {/* ============================================================ */}
@@ -810,7 +810,7 @@ function Dashboard() {
               variants={staggerContainer(0.06, 0.04)}
               initial="initial"
               animate="animate"
-              className="grid grid-cols-2 md:grid-cols-4 gap-3 w-full"
+              className="grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-3 w-full"
             >
               {systemTelemetry.map((metric) => (
                 <motion.div key={metric.label} variants={staggerItem}>
@@ -841,9 +841,9 @@ function Dashboard() {
             {/* ============================================================ */}
             {/* 2 & 3. COMMAND CENTER HERO & MISSION CONSOLE                  */}
             {/* ============================================================ */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch w-full">
-              {/* Left Column: NEXORA Core Computational Intelligence Unit */}
-              <div className="lg:col-span-5 flex flex-col items-center justify-center p-6 sm:p-8 rounded-xl bg-[#050508]/85 border border-[rgba(168,85,247,0.10)] relative overflow-hidden shadow-[0_16px_48px_rgba(0,0,0,0.85)]">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 lg:gap-6 items-stretch w-full">
+              {/* Left Column (Desktop) / Second (Mobile): NEXORA Core Computational Intelligence Unit */}
+              <div className="order-2 lg:order-1 lg:col-span-5 flex flex-col items-center justify-center p-4 sm:p-8 rounded-xl bg-[#050508]/85 border border-[rgba(168,85,247,0.10)] relative overflow-hidden shadow-[0_16px_48px_rgba(0,0,0,0.85)]">
                 {/* Corner Coordinate Badges */}
                 <div className="absolute top-3 left-3 text-[9px] font-mono text-[#554C5C] tracking-widest">
                   CORE // 0x7E3F

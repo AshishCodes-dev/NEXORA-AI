@@ -207,7 +207,7 @@ export default function MissionResultView({
             </TechnicalLabel>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {getStatusBadge()}
             {canCancel && (
               <button
@@ -219,6 +219,16 @@ export default function MissionResultView({
               >
                 <span className="h-1.5 w-1.5 rounded-full bg-[#EF4444] animate-pulse" />
                 {isCancelling ? 'ABORTING...' : 'ABORT MISSION'}
+              </button>
+            )}
+            {isTerminal && onReset && (
+              <button
+                type="button"
+                onClick={onReset}
+                title="Create another mission"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-xs font-mono font-bold bg-[#120B20] border border-[rgba(192,132,252,0.4)] text-[#E9D5FF] hover:text-white hover:border-[#C084FC] transition-colors cursor-pointer"
+              >
+                <span>+ NEW</span>
               </button>
             )}
           </div>
@@ -253,6 +263,31 @@ export default function MissionResultView({
             >
               DISMISS
             </button>
+          </div>
+        )}
+
+        {/* Invariant Rejection / Failure Notice Banner */}
+        {(resultStatus?.verification === 'failed' || missionStatus === 'failed') && (
+          <div className="rounded-lg bg-[rgba(239,68,68,0.08)] border border-[rgba(239,68,68,0.3)] p-3 mb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div className="text-xs font-mono text-[#FCA5A5]">
+              <span className="font-bold text-[#EF4444]">INVARIANT REJECTION:</span> A pipeline quality assertion flagged an issue. You can inspect the audit or retry tasks below.
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setActiveTab('audit')}
+                className="px-2.5 py-1 rounded bg-[#180A0E] border border-[rgba(239,68,68,0.4)] text-[10px] font-mono text-[#FCA5A5] hover:text-white cursor-pointer"
+              >
+                VIEW AUDIT
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('tasks')}
+                className="px-2.5 py-1 rounded bg-[#180A0E] border border-[rgba(239,68,68,0.4)] text-[10px] font-mono text-[#FCA5A5] hover:text-white cursor-pointer"
+              >
+                VIEW TASKS & RETRY
+              </button>
+            </div>
           </div>
         )}
 
@@ -361,7 +396,7 @@ export default function MissionResultView({
         )}
 
         {/* 5. Navigation Tabs */}
-        <div className="flex items-center gap-1 border-b border-[rgba(168,85,247,0.14)] mb-3 pb-1 overflow-x-auto">
+        <div className="flex items-center gap-1 border-b border-[rgba(168,85,247,0.14)] mb-3 pb-1 overflow-x-auto scrollbar-none flex-nowrap">
           <button
             type="button"
             onClick={() => setActiveTab('deliverable')}

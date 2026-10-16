@@ -78,7 +78,7 @@ export default function MissionComposer({
 
   return (
     <div
-      className={`lg:col-span-7 flex flex-col justify-between p-6 sm:p-8 rounded-xl bg-[#07060B]/90 border border-[rgba(168,85,247,0.12)] shadow-[0_16px_48px_rgba(0,0,0,0.85)] relative transition-all duration-300 ${
+      className={`order-1 lg:order-2 lg:col-span-7 flex flex-col justify-between p-4 sm:p-6 lg:p-8 rounded-xl bg-[#07060B]/90 border border-[rgba(168,85,247,0.12)] shadow-[0_16px_48px_rgba(0,0,0,0.85)] relative transition-all duration-300 ${
         submissionState === 'success' ? 'border-l-2 border-l-[#39FF88]' : 'border-l-2 border-l-[#A855F7]'
       }`}
     >
@@ -130,7 +130,7 @@ export default function MissionComposer({
               </div>
 
               {/* Dominant Focal Title */}
-              <h1 className="text-xl sm:text-2xl md:text-3xl font-mono font-bold tracking-tight text-[#F5F1FA] mb-2 leading-tight">
+              <h1 className="text-lg sm:text-2xl md:text-3xl font-mono font-bold tracking-tight text-[#F5F1FA] mb-2 leading-tight">
                 WHAT SHOULD NEXORA ACCOMPLISH?
               </h1>
 
@@ -145,7 +145,7 @@ export default function MissionComposer({
                   <span>Directive Suggestions</span>
                   <span className="text-[#756B7D]">Click to populate</span>
                 </div>
-                <div className="flex flex-wrap items-center gap-1.5">
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1.5 scrollbar-none flex-nowrap sm:flex-wrap">
                   {DIRECTIVE_SUGGESTIONS.map((suggestion) => (
                     <motion.button
                       key={suggestion.label}
@@ -256,7 +256,7 @@ export default function MissionComposer({
                 whileHover={submissionState === 'processing' || prefersReducedMotion ? {} : { scale: 1.012 }}
                 whileTap={submissionState === 'processing' || prefersReducedMotion ? {} : { scale: 0.985 }}
                 transition={springs.tactile}
-                className={`group relative inline-flex items-center justify-center gap-2.5 overflow-hidden rounded-lg px-6 py-2.5 text-xs sm:text-sm font-bold font-mono tracking-wider transition-colors duration-200 cursor-pointer min-h-[42px] ${
+                className={`group relative inline-flex items-center justify-center gap-2.5 overflow-hidden rounded-lg px-6 py-2.5 text-xs sm:text-sm font-bold font-mono tracking-wider transition-colors duration-200 cursor-pointer min-h-[42px] w-full sm:w-auto ${
                   submissionState === 'processing'
                     ? 'bg-[#090710] border border-[rgba(168,85,247,0.3)] text-[#C084FC] cursor-not-allowed opacity-80'
                     : submissionState === 'error'

@@ -124,9 +124,9 @@ export default function NexoraCore({
   const animationPlayState = prefersReducedMotion ? 'paused' : 'running';
 
   const sizeDimensions = {
-    sm: 'w-44 h-44',
-    md: 'w-60 h-60 sm:w-72 sm:h-72',
-    lg: 'w-72 h-72 sm:w-88 sm:h-88',
+    sm: 'w-32 h-32 sm:w-44 sm:h-44',
+    md: 'w-44 h-44 sm:w-60 sm:h-60 lg:w-72 lg:h-72',
+    lg: 'w-60 h-60 sm:w-72 sm:h-72 lg:w-88 lg:h-88',
   };
 
   return (

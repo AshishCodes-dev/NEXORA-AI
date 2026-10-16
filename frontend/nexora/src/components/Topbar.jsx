@@ -118,9 +118,10 @@ export default function Topbar({ onToggleSidebar, backendConnected = true }) {
           <div className="flex items-center gap-2">
             <Link
               to="/login"
-              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#050508] border border-[rgba(168,85,247,0.14)] hover:border-[rgba(192,132,252,0.4)] text-[10px] font-mono text-[#C084FC] hover:text-[#F5F1FA] transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#050508] border border-[rgba(168,85,247,0.14)] hover:border-[rgba(192,132,252,0.4)] text-[10px] font-mono text-[#C084FC] hover:text-[#F5F1FA] transition-colors cursor-pointer"
             >
-              <span>OPERATOR ACCESS</span>
+              <span className="hidden sm:inline">OPERATOR ACCESS</span>
+              <span className="sm:hidden">ACCESS</span>
               <span className="text-[#A855F7]">›</span>
             </Link>
 
