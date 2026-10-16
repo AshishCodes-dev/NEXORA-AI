@@ -8,7 +8,8 @@
     "build": "npm run build --prefix frontend/nexora",
     "build:frontend": "npm run build --prefix frontend/nexora",
     "test": "node backend/tests/run_phase2_regressions.js",
-    "test:backend": "node backend/tests/run_phase2_regressions.js"
+    "test:backend": "node backend/tests/run_phase2_regressions.js",
+    "start": "node backend/server.js"
   },
   "keywords": [
     "nexora",
