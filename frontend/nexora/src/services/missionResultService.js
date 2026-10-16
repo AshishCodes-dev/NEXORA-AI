@@ -11,9 +11,9 @@
  * - Handles 401, 404, 500, network errors, and malformed responses safely.
  */
 
-const BACKEND_URL = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_URL)
-  ? import.meta.env.VITE_API_URL
-  : 'http://localhost:5000';
+import { API_BASE_URL } from './apiConfig';
+
+const BACKEND_URL = API_BASE_URL;
 
 export class MissionResultError extends Error {
   constructor(message, status = null, code = null) {

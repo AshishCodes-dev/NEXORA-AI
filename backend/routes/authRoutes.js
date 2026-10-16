@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 const User = require('../models/User');
 const authMiddleware = require('../middleware/authMiddleware');
-const { getJwtSecret, COOKIE_NAME, getCookieOptions, getGoogleClientId } = require('../config/authConfig');
+const { getJwtSecret, COOKIE_NAME, getCookieOptions, getClearCookieOptions, getGoogleClientId } = require('../config/authConfig');
 const { authRateLimiter } = require('../middleware/rateLimiter');
 
 let defaultOAuthClient = null;
@@ -222,13 +222,7 @@ router.post('/login', authRateLimiter, async (req, res) => {
  * Invalidate session by clearing the authentication cookie
  */
 router.post('/logout', (req, res) => {
-  const isProduction = process.env.NODE_ENV === 'production';
-  res.clearCookie(COOKIE_NAME, {
-    httpOnly: true,
-    secure: isProduction,
-    sameSite: isProduction ? 'strict' : 'lax',
-    path: '/'
-  });
+  res.clearCookie(COOKIE_NAME, getClearCookieOptions());
 
   return res.status(200).json({
     success: true,

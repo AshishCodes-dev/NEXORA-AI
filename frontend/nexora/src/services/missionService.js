@@ -10,9 +10,9 @@
  * - Provides event transformation and evidence mapping for UI consumption
  */
 
-export const API_BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_URL)
-  ? import.meta.env.VITE_API_URL
-  : 'http://localhost:5000';
+import { API_BASE_URL } from './apiConfig';
+
+export { API_BASE_URL };
 
 export class MissionApiError extends Error {
   constructor(message, status = null, code = null) {

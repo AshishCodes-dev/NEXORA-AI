@@ -36,6 +36,48 @@ function getConcurrencyStatus() {
 }
 
 /**
+ * Resolves standard Chromium launch options for headless execution across
+ * local workstations and containerized Linux hosting environments.
+ *
+ * Enforces:
+ * - '--no-sandbox' & '--disable-setuid-sandbox' for containerized Linux execution
+ * - '--disable-dev-shm-usage' to prevent Docker 64MB /dev/shm partition exhaustion
+ * - '--disable-gpu' for headless server instances
+ *
+ * @param {object} [customOptions={}]
+ * @returns {object} Playwright launch options
+ */
+function getChromiumLaunchOptions(customOptions = {}) {
+  const isLinux = process.platform === 'linux';
+  const isContainer = Boolean(
+    isLinux ||
+    process.env.DOCKER_CONTAINER === 'true' ||
+    process.env.CONTAINER === 'true' ||
+    process.env.PLAYWRIGHT_CONTAINER_MODE === 'true' ||
+    process.env.RENDER === 'true' ||
+    process.env.RAILWAY_ENVIRONMENT
+  );
+
+  const baseArgs = [
+    '--disable-gpu',
+    '--disable-dev-shm-usage',
+  ];
+
+  if (isContainer) {
+    baseArgs.push('--no-sandbox', '--disable-setuid-sandbox');
+  }
+
+  const userArgs = customOptions.args || [];
+  const mergedArgs = Array.from(new Set([...baseArgs, ...userArgs]));
+
+  return {
+    headless: true,
+    ...customOptions,
+    args: mergedArgs,
+  };
+}
+
+/**
  * Executes a single controlled browser operation.
  * 
  * @param {object} params
@@ -133,9 +175,7 @@ async function executeBrowserOperation({
     const executionPromise = (async () => {
       // 4. Launch isolated Chromium instance
       try {
-        browser = await chromium.launch({
-          headless: true,
-        });
+        browser = await chromium.launch(getChromiumLaunchOptions(options.launchOptions));
       } catch (launchErr) {
         const error = new Error(`Failed to launch Chromium browser: ${launchErr.message}`);
         error.code = 'BROWSER_LAUNCH_FAILED';
@@ -414,7 +454,7 @@ async function executeBrowserOperation({
  * @returns {Promise<{ browser: object, contextA: object, contextB: object }>}
  */
 async function createIsolatedContextsForTest() {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(getChromiumLaunchOptions());
   const contextA = await browser.newContext({ viewport: BROWSER_POLICY.VIEWPORT });
   const contextB = await browser.newContext({ viewport: BROWSER_POLICY.VIEWPORT });
   return { browser, contextA, contextB };
@@ -428,4 +468,5 @@ module.exports = {
   executeBrowserOperation,
   getConcurrencyStatus,
   createIsolatedContextsForTest,
+  getChromiumLaunchOptions,
 };

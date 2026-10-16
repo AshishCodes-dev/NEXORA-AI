@@ -119,6 +119,19 @@ function getCookieOptions(env = process.env) {
 }
 
 /**
+ * Standard cookie options for session token invalidation / clearing.
+ * Matches getCookieOptions attributes (path, httpOnly, secure, sameSite) without maxAge.
+ *
+ * @param {object} [env=process.env]
+ * @returns {import('express').CookieOptions}
+ */
+function getClearCookieOptions(env = process.env) {
+  const options = getCookieOptions(env);
+  delete options.maxAge;
+  return options;
+}
+
+/**
  * Resolves the configured Google OAuth Client ID.
  * Returns null if unconfigured.
  *
@@ -141,5 +154,6 @@ module.exports = {
   validateAuthConfig,
   isProductionConfigured,
   getCookieOptions,
+  getClearCookieOptions,
   getGoogleClientId,
 };
