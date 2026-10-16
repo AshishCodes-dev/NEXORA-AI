@@ -23,8 +23,16 @@ function routeTaskToAgent(task, context = {}) {
 
   const textToEvaluate = `${task.title || ''} ${task.description || ''}`.toLowerCase();
 
+  const hasExplicitUrl = Boolean(
+    task.url ||
+    task.targetUrl ||
+    context.url ||
+    context.targetUrl ||
+    /https?:\/\/[^\s"'<>)\]]+/i.test(textToEvaluate)
+  );
+
   // 2. Deterministic keyword matching (ordered by specificity)
-  if (/\b(browser|web|url|website|site|page|dom|scrape|navigate)\b/.test(textToEvaluate)) {
+  if (hasExplicitUrl || /\b(browser|dom|scrape|navigate|playwright|chromium)\b/.test(textToEvaluate)) {
     return 'browser';
   }
 

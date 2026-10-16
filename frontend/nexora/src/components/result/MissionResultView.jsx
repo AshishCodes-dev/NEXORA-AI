@@ -505,6 +505,11 @@ export default function MissionResultView({
                             {task.description}
                           </p>
                         )}
+                        {task.error && (
+                          <div className="mt-1 text-[10px] font-mono text-[#FCA5A5] bg-[rgba(239,68,68,0.06)] px-2 py-1 rounded border border-[rgba(239,68,68,0.2)]">
+                            <span className="font-semibold text-[#EF4444]">ERROR:</span> {task.error}
+                          </div>
+                        )}
                       </div>
                     </div>
 

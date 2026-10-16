@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/run_phase2_regressions.js"
+    "test": "node tests/run_phase2_regressions.js",
+    "postinstall": "npx playwright install chromium || true"
   },
   "keywords": [],
   "type": "commonjs",
