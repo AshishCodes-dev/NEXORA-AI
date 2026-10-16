@@ -11,7 +11,7 @@
  * - Handles 401, 404, 500, network errors, and malformed responses safely.
  */
 
-import { API_BASE_URL } from './apiConfig';
+import { API_BASE_URL, getAuthHeaders } from './apiConfig';
 
 const BACKEND_URL = API_BASE_URL;
 
@@ -55,9 +55,9 @@ export async function getMissionResult(missionId, options = {}) {
   try {
     response = await fetch(url, {
       method: 'GET',
-      headers: {
+      headers: getAuthHeaders({
         'Accept': 'application/json',
-      },
+      }),
       credentials: 'include',
       signal: options.signal,
     });

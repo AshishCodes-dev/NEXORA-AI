@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { API_BASE_URL } from '../services/apiConfig';
+import { API_BASE_URL, getAuthHeaders, setStoredToken } from '../services/apiConfig';
 
 const AuthContext = createContext(null);
 
@@ -10,14 +10,14 @@ export function AuthProvider({ children }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Session Hydration: verify existing session via HttpOnly cookie
+  // Session Hydration: verify existing session via HttpOnly cookie or Bearer token
   const refreshSession = useCallback(async () => {
     try {
       const response = await fetch(`${BACKEND_URL}/api/auth/me`, {
         method: 'GET',
-        headers: {
+        headers: getAuthHeaders({
           'Accept': 'application/json',
-        },
+        }),
         credentials: 'include',
       });
 
@@ -32,6 +32,7 @@ export function AuthProvider({ children }) {
 
       setUser(null);
       setIsAuthenticated(false);
+      setStoredToken(null);
       return null;
     } catch {
       // Network failure or backend offline - safely degrade to unauthenticated
@@ -87,6 +88,10 @@ export function AuthProvider({ children }) {
           ? 'Invalid email or password'
           : `Authentication failed (HTTP ${response.status})`);
       throw new Error(message);
+    }
+
+    if (data?.token) {
+      setStoredToken(data.token);
     }
 
     setUser(data.user);
@@ -163,6 +168,10 @@ export function AuthProvider({ children }) {
       throw new Error(message);
     }
 
+    if (data?.token) {
+      setStoredToken(data.token);
+    }
+
     setUser(data.user);
     setIsAuthenticated(true);
     return data.user;
@@ -173,14 +182,15 @@ export function AuthProvider({ children }) {
     try {
       await fetch(`${BACKEND_URL}/api/auth/logout`, {
         method: 'POST',
-        headers: {
+        headers: getAuthHeaders({
           'Accept': 'application/json',
-        },
+        }),
         credentials: 'include',
       });
     } catch {
       // Even if network fails, clear local auth state
     } finally {
+      setStoredToken(null);
       setUser(null);
       setIsAuthenticated(false);
     }

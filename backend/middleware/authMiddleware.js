@@ -6,8 +6,15 @@ const { getJwtSecret, COOKIE_NAME } = require('../config/authConfig');
  * Identifies the currently authenticated user from the HTTP-only nexora_token cookie.
  */
 const authMiddleware = (req, res, next) => {
-  // 1. Read token from cookie
-  const token = req.cookies && req.cookies[COOKIE_NAME];
+  // 1. Read token from cookie or Authorization header
+  let token = req.cookies && req.cookies[COOKIE_NAME];
+
+  if (!token && req.headers && req.headers.authorization) {
+    const authHeader = req.headers.authorization.trim();
+    if (authHeader.toLowerCase().startsWith('bearer ')) {
+      token = authHeader.slice(7).trim();
+    }
+  }
 
   if (!token) {
     return res.status(401).json({

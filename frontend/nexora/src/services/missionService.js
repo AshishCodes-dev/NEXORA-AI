@@ -10,7 +10,7 @@
  * - Provides event transformation and evidence mapping for UI consumption
  */
 
-import { API_BASE_URL } from './apiConfig';
+import { API_BASE_URL, getAuthHeaders } from './apiConfig';
 
 export { API_BASE_URL };
 
@@ -62,10 +62,10 @@ export async function createMission({ objective, priority = 'medium', modelTier 
   try {
     response = await fetch(url, {
       method: 'POST',
-      headers: {
+      headers: getAuthHeaders({
         'Content-Type': 'application/json',
         'Accept': 'application/json',
-      },
+      }),
       credentials: 'include',
       signal: options.signal,
       body: JSON.stringify({
@@ -153,9 +153,9 @@ export async function getMissionEvents(missionId, options = {}) {
   try {
     response = await fetch(url, {
       method: 'GET',
-      headers: {
+      headers: getAuthHeaders({
         'Accept': 'application/json',
-      },
+      }),
       credentials: 'include',
       signal: options.signal,
     });
@@ -224,9 +224,9 @@ export async function getMissionResult(missionId, options = {}) {
   try {
     response = await fetch(url, {
       method: 'GET',
-      headers: {
+      headers: getAuthHeaders({
         'Accept': 'application/json',
-      },
+      }),
       credentials: 'include',
       signal: options.signal,
     });
@@ -611,10 +611,10 @@ export async function cancelMission(missionId, options = {}) {
   try {
     response = await fetch(url, {
       method: 'POST',
-      headers: {
+      headers: getAuthHeaders({
         'Content-Type': 'application/json',
         'Accept': 'application/json',
-      },
+      }),
       credentials: 'include',
       signal: options.signal,
       body: JSON.stringify({
@@ -691,9 +691,9 @@ export async function retryTask(missionId, taskId, options = {}) {
   try {
     response = await fetch(url, {
       method: 'POST',
-      headers: {
+      headers: getAuthHeaders({
         'Accept': 'application/json',
-      },
+      }),
       credentials: 'include',
       signal: options.signal,
     });

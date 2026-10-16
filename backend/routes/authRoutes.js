@@ -201,6 +201,7 @@ router.post('/login', authRateLimiter, async (req, res) => {
     // 8. Return safe user response
     return res.status(200).json({
       success: true,
+      token,
       user: {
         id: user._id.toString(),
         name: user.name,
@@ -438,6 +439,7 @@ router.post('/google', authRateLimiter, async (req, res) => {
     // 6. Return safe user profile
     return res.status(200).json({
       success: true,
+      token,
       user: {
         id: user._id.toString(),
         name: user.name,

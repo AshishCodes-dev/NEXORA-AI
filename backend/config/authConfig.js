@@ -109,10 +109,11 @@ function isProductionConfigured(env = process.env) {
  */
 function getCookieOptions(env = process.env) {
   const isProduction = (env.NODE_ENV || 'development') === 'production';
+  const sameSite = env.COOKIE_SAME_SITE || 'lax';
   return {
     httpOnly: true,
     secure: isProduction,
-    sameSite: 'lax',
+    sameSite,
     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in milliseconds
     path: '/',
   };
