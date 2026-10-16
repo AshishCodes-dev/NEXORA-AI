@@ -2,38 +2,13 @@ const dns = require('dns').promises;
 const net = require('net');
 
 /**
- * Checks whether an IP address belongs to private, loopback, link-local,
- * multicast, or reserved ranges.
+ * Checks whether an IPv4 numeric array [a, b, c, d] falls into private or reserved ranges.
  * 
- * @param {string} rawIp - IPv4 or IPv6 address string
- * @returns {boolean} True if the IP is private or reserved
+ * @param {number[]} parts
+ * @returns {boolean}
  */
-function isPrivateIp(rawIp) {
-  if (!rawIp || typeof rawIp !== 'string') return true;
-
-  let ip = rawIp.trim();
-
-  // IPv6 loopback or unspecified
-  if (ip === '::1' || ip === '::' || ip === '0:0:0:0:0:0:0:1' || ip === '0:0:0:0:0:0:0:0') {
-    return true;
-  }
-
-  // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
-  if (ip.toLowerCase().startsWith('::ffff:')) {
-    ip = ip.substring(7);
-  }
-
-  if (!net.isIPv4(ip)) {
-    const lower = ip.toLowerCase();
-    // Unique local (fc00::/7) or link-local (fe80::/10)
-    if (lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe80') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) {
-      return true;
-    }
-    return false;
-  }
-
-  const parts = ip.split('.').map(Number);
-  if (parts.length !== 4 || parts.some(n => isNaN(n) || n < 0 || n > 255)) {
+function isPrivateIPv4Parts(parts) {
+  if (!parts || parts.length !== 4 || parts.some(n => isNaN(n) || n < 0 || n > 255)) {
     return true;
   }
 
@@ -77,6 +52,156 @@ function isPrivateIp(rawIp) {
   if (parts[0] >= 224) return true;
 
   return false;
+}
+
+/**
+ * Parses an IPv6 address string into 8 16-bit numeric words.
+ * Handles abbreviated '::' syntax and embedded IPv4 notations.
+ * 
+ * @param {string} rawIp
+ * @returns {number[]|null}
+ */
+function parseIPv6Words(rawIp) {
+  let clean = rawIp.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  const colonParts = clean.split('::');
+  if (colonParts.length > 2) return null;
+
+  function parseSegment(seg) {
+    if (!seg) return [];
+    const tokens = seg.split(':');
+    const words = [];
+    for (const tok of tokens) {
+      if (tok.includes('.')) {
+        const v4 = tok.split('.').map(Number);
+        if (v4.length !== 4 || v4.some(n => isNaN(n) || n < 0 || n > 255)) return null;
+        words.push((v4[0] << 8) | v4[1]);
+        words.push((v4[2] << 8) | v4[3]);
+      } else {
+        const n = parseInt(tok, 16);
+        if (isNaN(n) || n < 0 || n > 0xffff) return null;
+        words.push(n);
+      }
+    }
+    return words;
+  }
+
+  const left = parseSegment(colonParts[0]);
+  if (!left) return null;
+
+  if (colonParts.length === 2) {
+    const right = parseSegment(colonParts[1]);
+    if (!right) return null;
+    const missing = 8 - (left.length + right.length);
+    if (missing < 0) return null;
+    return [...left, ...new Array(missing).fill(0), ...right];
+  }
+
+  return left.length === 8 ? left : null;
+}
+
+/**
+ * Checks whether an IP address belongs to private, loopback, link-local,
+ * multicast, carrier-grade NAT, or reserved ranges.
+ * Supports IPv4, IPv6, IPv4-mapped IPv6 (dotted and hex), 6to4, NAT64, and ULA.
+ * 
+ * @param {string} rawIp - IPv4 or IPv6 address string
+ * @returns {boolean} True if the IP is private or reserved
+ */
+function isPrivateIp(rawIp) {
+  if (!rawIp || typeof rawIp !== 'string') return true;
+
+  const ip = rawIp.trim().replace(/^\[|\]$/g, '');
+
+  // 1. Standard IPv4 validation
+  if (net.isIPv4(ip)) {
+    const parts = ip.split('.').map(Number);
+    return isPrivateIPv4Parts(parts);
+  }
+
+  // 2. IPv6 and encapsulated IP validation
+  if (net.isIPv6(ip)) {
+    const words = parseIPv6Words(ip);
+    if (!words) return true; // Malformed IPv6 treated as unsafe
+
+    // Loopback (::1)
+    if (words.slice(0, 7).every(w => w === 0) && words[7] === 1) {
+      return true;
+    }
+
+    // Unspecified (::)
+    if (words.every(w => w === 0)) {
+      return true;
+    }
+
+    // IPv4-mapped IPv6 (::ffff:0:0/96, e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1)
+    if (words.slice(0, 5).every(w => w === 0) && words[5] === 0xffff) {
+      const v4Parts = [
+        (words[6] >> 8) & 0xff,
+        words[6] & 0xff,
+        (words[7] >> 8) & 0xff,
+        words[7] & 0xff,
+      ];
+      return isPrivateIPv4Parts(v4Parts);
+    }
+
+    // IPv4-compatible IPv6 (::0:0/96, deprecated)
+    if (words.slice(0, 6).every(w => w === 0) && !(words[6] === 0 && words[7] === 1)) {
+      const v4Parts = [
+        (words[6] >> 8) & 0xff,
+        words[6] & 0xff,
+        (words[7] >> 8) & 0xff,
+        words[7] & 0xff,
+      ];
+      return isPrivateIPv4Parts(v4Parts);
+    }
+
+    // NAT64 Well-Known Prefix (64:ff9b::/96)
+    if (words[0] === 0x0064 && words[1] === 0xff9b && words.slice(2, 6).every(w => w === 0)) {
+      const v4Parts = [
+        (words[6] >> 8) & 0xff,
+        words[6] & 0xff,
+        (words[7] >> 8) & 0xff,
+        words[7] & 0xff,
+      ];
+      return isPrivateIPv4Parts(v4Parts);
+    }
+
+    // 6to4 prefix (2002::/16) - encapsulates IPv4 in words 1 and 2
+    if (words[0] === 0x2002) {
+      const v4Parts = [
+        (words[1] >> 8) & 0xff,
+        words[1] & 0xff,
+        (words[2] >> 8) & 0xff,
+        words[2] & 0xff,
+      ];
+      return isPrivateIPv4Parts(v4Parts);
+    }
+
+    // Unique Local Addresses (fc00::/7)
+    if ((words[0] & 0xfe00) === 0xfc00) return true;
+
+    // Link-local unicast (fe80::/10)
+    if ((words[0] & 0xffc0) === 0xfe80) return true;
+
+    // Site-local unicast (fec0::/10, deprecated)
+    if ((words[0] & 0xffc0) === 0xfec0) return true;
+
+    // Multicast (ff00::/8)
+    if ((words[0] & 0xff00) === 0xff00) return true;
+
+    // Documentation (2001:db8::/32)
+    if (words[0] === 0x2001 && words[1] === 0x0db8) return true;
+
+    // Discard-only prefix (100::/64)
+    if (words[0] === 0x0100 && words[1] === 0 && words[2] === 0 && words[3] === 0) return true;
+
+    // Benchmarking (2001:2::/48)
+    if (words[0] === 0x2001 && words[1] === 0x0002) return true;
+
+    return false;
+  }
+
+  return true;
 }
 
 /**

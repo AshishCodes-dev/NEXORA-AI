@@ -79,6 +79,7 @@ const suites = [
   'verify_step8g6_p2_13.js',
   'verify_step8g6_p2_14.js',
   'verify_step8g6_p2_15.js',
+  'verify_security_hardening.js',
 ];
 
 const results = [];

@@ -21,11 +21,16 @@
 export function resolveApiBaseUrl(env) {
   const activeEnv = env || (typeof import.meta !== 'undefined' ? import.meta.env : undefined);
   if (activeEnv && typeof activeEnv.VITE_API_URL === 'string') {
-    const trimmed = activeEnv.VITE_API_URL.trim();
+    let trimmed = activeEnv.VITE_API_URL.trim();
     if (trimmed === '' || trimmed === '/') {
       return '';
     }
-    return trimmed.replace(/\/+$/, '');
+    trimmed = trimmed.replace(/\/+$/, '');
+    // Prevent duplicated /api prefixes if environment variable includes /api
+    if (trimmed.toLowerCase().endsWith('/api')) {
+      trimmed = trimmed.slice(0, -4).replace(/\/+$/, '');
+    }
+    return trimmed;
   }
   return 'http://localhost:5000';
 }

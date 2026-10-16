@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="nexoraBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#120A24"/>
+      <stop offset="100%" stop-color="#050508"/>
+    </linearGradient>
+    <linearGradient id="nexoraText" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F5F1FA"/>
+      <stop offset="50%" stop-color="#C084FC"/>
+      <stop offset="100%" stop-color="#A855F7"/>
+    </linearGradient>
+    <filter id="neonGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="0" stdDeviation="2" flood-color="#A855F7" flood-opacity="0.8"/>
+    </filter>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#nexoraBg)" stroke="#A855F7" stroke-width="2" stroke-opacity="0.5"/>
+  <path d="M21 44 L21 20 L27.5 20 L36.5 35.5 L36.5 20 L43 20 L43 44 L36.5 44 L27.5 28.5 L27.5 44 Z" fill="url(#nexoraText)" filter="url(#neonGlow)"/>
+  <circle cx="48" cy="15" r="3.5" fill="#39FF88"/>
+</svg>

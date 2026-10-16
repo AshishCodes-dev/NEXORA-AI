@@ -121,8 +121,13 @@ async function executeBrowserTask(task, context = {}) {
     options: context.options || {},
   });
 
-  // Resilient HTTP fallback if Playwright / Chromium fails to launch (e.g. in headless cloud environments like Render)
-  if (browserResult.status !== 'completed' && targetUrl) {
+  const isSecurityRejection = ['BLOCKED_URL', 'INVALID_URL', 'UNSUPPORTED_OPERATION'].includes(
+    browserResult.data?.error?.code || browserResult.data?.errorCode
+  );
+
+  // Resilient HTTP fallback if Playwright / Chromium fails to launch (e.g. in headless cloud environments like Render),
+  // but NEVER bypass security rejections (SSRF/protocol blocks)
+  if (browserResult.status !== 'completed' && !isSecurityRejection && targetUrl) {
     try {
       const { fetchSource } = require('../services/research/sourceFetcher');
       const fetched = await fetchSource(targetUrl, { timeoutMs: 12000 });
